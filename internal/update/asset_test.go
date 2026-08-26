@@ -21,6 +21,8 @@ func TestAssetNamesFor(t *testing.T) {
 		{"linux", "386", []string{"vocat-linux-386"}},
 		{"linux", "arm64", []string{"vocat-linux-arm64", "vocat-linux-aarch64"}},
 		{"linux", "arm", []string{"vocat-linux-armv7", "vocat-linux-arm"}},
+		{"windows", "amd64", []string{"vocat-windows-amd64.exe"}},
+		{"windows", "arm64", []string{"vocat-windows-arm64.exe"}},
 	}
 	for _, item := range tests {
 		if got := assetNamesFor(item.goos, item.goarch); !reflect.DeepEqual(got, item.want) {

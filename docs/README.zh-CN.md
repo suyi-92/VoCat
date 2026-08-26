@@ -15,6 +15,7 @@
 
 <p align="center">
   <img alt="Linux" src="https://img.shields.io/badge/Linux-amd64_%7C_386_%7C_arm64_%7C_armv7-FCC624?style=flat-square&logo=linux&logoColor=111111">
+  <img alt="Windows 11" src="https://img.shields.io/badge/Windows_11-amd64_%7C_arm64-0078D4?style=flat-square&logo=windows11&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-Multi--Arch-2496ED?style=flat-square&logo=docker&logoColor=white">
   <img alt="WiFi Calling" src="https://img.shields.io/badge/WiFi_Calling-IMS_SMS-7B1FA2?style=flat-square">
   <img alt="eSIM" src="https://img.shields.io/badge/eSIM-LPA_%2F_eUICC-009688?style=flat-square">
@@ -24,7 +25,7 @@
 
 [English](../README.md) | [العربية](README.ar.md) | **简体中文** | [繁體中文](README.zh-TW.md) | [Français](README.fr.md) | [Русский](README.ru.md) | [Español](README.es.md) | [日本語](README.ja.md)
 
-Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制面板与工程工具套件。它在一个自包含的服务中整合了模组发现、实时射频状态、AT 与 USSD 终端、短信、WiFi Calling(WiFi 通话)、eSIM 管理、网络选择、代理路由、通知、审计日志以及发布自动化。
+Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组和 CCID eUICC 读卡器的 source-available（源码可见）Web 控制面板与工程工具套件。它在一个自包含的服务中整合了模组发现、实时射频状态、AT 与 USSD 终端、短信、WiFi Calling(WiFi 通话)、eSIM 管理、网络选择、代理路由、通知、审计日志以及发布自动化。
 
 后端使用 Go 编写,界面采用 React 与 TypeScript 构建,生产环境前端被嵌入进 Go 二进制中。单个可执行文件即包含完整的 Web 应用,并使用 SQLite 进行持久化存储。
 
@@ -48,7 +49,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 | 通知 | 通过 Telegram、Bark、邮件、Pushplus 以及签名 Webhook 转发新入站短信,每条短信单独推送。 |
 | Telegram 机器人 | 设备状态、已安装配置文件列表与切换、WiFi Calling 控制以及短信发送。敏感操作需要管理员确认。 |
 | 运维 | 鉴权、CSRF 防护、访问策略、审计事件、实时日志、日志留存、健康检查、响应式布局、深色模式以及中英文应用界面。 |
-| 分发 | 静态 Linux 二进制、systemd 安装脚本、带 SHA-256 校验的自更新、Docker 镜像、GHCR 发布以及 GitHub Actions 发布构建。 |
+| 分发 | 静态 Linux 与原生 Windows 11 二进制、Linux 带 SHA-256 校验的自更新、systemd 安装、Docker/GHCR 发布以及 GitHub Actions 发布构建。 |
 
 ## 支持的硬件
 
@@ -60,6 +61,11 @@ Vocat 面向基于高通芯片、并暴露兼容 AT、QMI、串口与 USB 网络
 - 兼容的 EG600 及相关模组
 
 可用功能取决于模组固件、USB 复合设备配置、SIM/eSIM 能力、主机驱动、无线网络以及运营商配置。
+
+Windows 11 还可通过系统 PC/SC 原生访问标准 CCID eUICC 读卡器。已经实机验证的
+`VID_04D9&PID_C001` 设备将读卡接口显示为 `SCR Prime 0`；它是
+CCID/DFU/厂商私有复合设备，并不是 Quectel 或大疆 Modem。接口映射、安装步骤和功能
+边界见 [Windows 11 原生部署文档](WINDOWS.md)。
 
 ## 安装
 
@@ -125,6 +131,8 @@ http://<服务器地址>:7575
 | Linux x86 32 位 | `vocat-linux-386` |
 | Linux ARM64 | `vocat-linux-arm64` |
 | Linux ARMv7 | `vocat-linux-armv7` |
+| Windows 11 x86-64 | `vocat-windows-amd64.exe` |
+| Windows 11 ARM64 | `vocat-windows-arm64.exe` |
 
 校验并安装:
 
@@ -141,6 +149,13 @@ sudo env \
 ```
 
 该手动命令会在前台运行 Vocat。请使用 `vocat serve` 以直接启动服务器；在 TTY 下以 root 运行无参数的 `vocat` 会进入交互式管理菜单。如需托管的 systemd 服务与自动重启,请使用一键安装脚本。
+
+### Windows 11 原生运行
+
+Windows 版使用 `winscard.dll` 访问 PC/SC eUICC，使用 Wintun 承载协商出的
+VoWiFi 内层网络，并使用 WFP Manual IPsec 保护 IMS 流量。请下载匹配架构的
+Windows Release 文件，然后按 [Windows 11 原生部署文档](WINDOWS.md) 操作。
+仓库不捆绑 `wintun.dll`。
 
 ### Docker
 
@@ -182,7 +197,8 @@ GHCR 镜像发布为 `linux/amd64` 与 `linux/arm64`。
 
 ### USB SIM 读卡器
 
-USB SIM 读卡器通过 Linux PC/SC 服务访问。一键安装脚本会在支持的软件包管理器上
+Windows 11 通过系统 Smart Card Service 与 `winscard.dll` 原生访问 USB
+SIM/eUICC 读卡器，不需要安装 `pcscd`。Linux 通过 PC/SC 服务访问，一键安装脚本会在支持的软件包管理器上
 自动安装并启动 `pcscd` 和 CCID 驱动；Debian/Ubuntu 手动安装命令为
 `apt install pcscd libccid`。如果 USB 已识别 CCID 读卡器但 PC/SC 尚未就绪，
 VoCat 会继续在添加设备窗口显示该硬件，并明确提示缺少服务或驱动，不再静默隐藏。
@@ -265,7 +281,10 @@ vocat update --check --repo MengMengCode/VoCat
 sudo vocat update --repo MengMengCode/VoCat
 ```
 
-更新器会下载与当前 Linux 架构匹配的二进制,使用已发布的 `SHA256SUMS` 进行校验,原子性地替换可执行文件,并在可用时重启 `vocat` systemd 服务。
+在受支持的 Linux 安装上，更新器会下载匹配架构的二进制，使用已发布的
+`SHA256SUMS` 校验，原子替换可执行文件，并在可用时重启 `vocat` systemd
+服务。Windows 支持检查更新，但必须先退出 VoCat 再手动替换 `.exe`，详见
+[Windows 更新步骤](WINDOWS.md#updating-on-windows)。
 
 Docker 安装的更新方式:
 

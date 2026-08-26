@@ -2,6 +2,7 @@
 /vocat
 /vocat.exe
 /build/
+/wintun/
 /release.py
 /build/vocat
 /build/vocat-linux-amd64
@@ -42,8 +43,10 @@ build/*.py
 # ---- Docs / scratch ----
 *.md
 !README.md
+!MODIFICATIONS.md
 !docs/**/*.md
 *.txt
+!LICENSES/*.txt
 build/lists/
 
 # ---- Editor / IDE ----

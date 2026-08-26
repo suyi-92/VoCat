@@ -36,7 +36,13 @@ jobs:
 
   test:
     needs: web
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,25 +67,40 @@ jobs:
       matrix:
         include:
           - target: linux-amd64
+            goos: linux
             goarch: amd64
             goarm: ""
             filename: vocat-linux-amd64
           - target: linux-386
+            goos: linux
             goarch: "386"
             goarm: ""
             filename: vocat-linux-386
           - target: linux-arm64
+            goos: linux
             goarch: arm64
             goarm: ""
             filename: vocat-linux-arm64
           - target: linux-aarch64
+            goos: linux
             goarch: arm64
             goarm: ""
             filename: vocat-linux-aarch64
           - target: linux-armv7
+            goos: linux
             goarch: arm
             goarm: "7"
             filename: vocat-linux-armv7
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            goarm: ""
+            filename: vocat-windows-amd64.exe
+          - target: windows-arm64
+            goos: windows
+            goarch: arm64
+            goarm: ""
+            filename: vocat-windows-arm64.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,11 +115,11 @@ jobs:
           name: web-dist
           path: web/dist
       - name: Set up QEMU for ARM64 runtime smoke test
-        if: matrix.goarch == 'arm64'
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
         uses: docker/setup-qemu-action@v3
       - name: Build ${{ matrix.target }}
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: "0"
@@ -112,15 +133,17 @@ jobs:
             -ldflags "-s -w -X vocat/internal/buildinfo.Version=${VERSION} -X vocat/internal/buildinfo.BuildTime=${BUILD_TIME}" \
             -o "$OUTPUT" \
             ./cmd/vocat
-          chmod 0755 "$OUTPUT"
-          if readelf -l "$OUTPUT" | grep -q 'Requesting program interpreter'; then
-            echo "ERROR: $OUTPUT unexpectedly requires a dynamic loader" >&2
-            readelf -l "$OUTPUT" >&2
-            exit 1
+          if [ "$GOOS" = linux ]; then
+            chmod 0755 "$OUTPUT"
+            if readelf -l "$OUTPUT" | grep -q 'Requesting program interpreter'; then
+              echo "ERROR: $OUTPUT unexpectedly requires a dynamic loader" >&2
+              readelf -l "$OUTPUT" >&2
+              exit 1
+            fi
+            case "${{ matrix.goarch }}" in
+              amd64|arm64) "$OUTPUT" version ;;
+            esac
           fi
-          case "${{ matrix.goarch }}" in
-            amd64|arm64) "$OUTPUT" version ;;
-          esac
       - name: Upload ${{ matrix.target }}
         uses: actions/upload-artifact@v4
         with:
@@ -144,7 +167,7 @@ jobs:
           merge-multiple: true
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum vocat-linux-* | sort > SHA256SUMS
+        run: sha256sum vocat-* | sort > SHA256SUMS
       - name: Create or update GitHub Release
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

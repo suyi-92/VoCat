@@ -841,6 +841,32 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateApplyReportsManualUpdateRequirement(t *testing.T) {
+	server := &Server{
+		logger:           regionTestLogger(),
+		updateRepository: update.DefaultRepository,
+		updateApply: func(context.Context, *slog.Logger, update.Options, bool) (update.CheckResult, error) {
+			return update.CheckResult{}, update.ErrInPlaceUpdateUnsupported
+		},
+	}
+	recorder := httptest.NewRecorder()
+	server.handleUpdateApply(recorder, httptest.NewRequest(http.MethodPost, "/apply", nil))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "manual_update_required" {
+		t.Fatalf("error code = %q", envelope.Error.Code)
+	}
+}
+
 func TestE911WebsheetFlow(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {

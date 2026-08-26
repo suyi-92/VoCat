@@ -8,3 +8,28 @@ VoCat uses the following Go module for native Qualcomm QMI support:
 
 The full MIT license text is included in:
 LICENSES/quectel-qmi-go-MIT.txt
+
+VoCat's native Windows data plane uses the following official Go modules:
+
+  golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
+  Source and binary distribution: https://www.wintun.net/
+  License: MIT
+
+  golang.zx2c4.com/wireguard/windows v1.0.1
+  Project: https://www.wireguard.com/
+  License: MIT
+  Copyright: Copyright (C) 2018-2026 WireGuard LLC. All Rights Reserved.
+
+VoCat imports the WireGuard Windows winipcfg package for Windows network
+interface, address, and route configuration. The full license texts are
+included in:
+
+LICENSES/wintun-MIT.txt
+LICENSES/wireguard-windows-MIT.txt
+
+The VoCat repository does not contain or redistribute wintun.dll. Operators
+who enable Windows VoWiFi obtain the official, architecture-matched DLL
+separately under its accompanying license terms.
+
+Material modifications made by the Windows fork are described in:
+MODIFICATIONS.md

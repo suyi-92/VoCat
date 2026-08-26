@@ -71,15 +71,9 @@ func (media *rtpMedia) ready() bool {
 }
 
 func (media *rtpMedia) offerSDP(local net.IP) []byte {
-	return media.buildSDP(local, "8 0 104 102 100", []string{
+	return media.buildSDP(local, "8 0", []string{
 		"a=rtpmap:8 PCMA/8000",
 		"a=rtpmap:0 PCMU/8000",
-		"a=rtpmap:104 AMR-WB/16000",
-		"a=fmtp:104 mode-change-capability=2;max-red=220",
-		"a=rtpmap:102 AMR/8000",
-		"a=fmtp:102 mode-change-capability=2;max-red=220",
-		"a=rtpmap:100 telephone-event/8000",
-		"a=fmtp:100 0-15",
 	})
 }
 
@@ -90,12 +84,8 @@ func (media *rtpMedia) answerSDP(local net.IP) []byte {
 	if codec == "" {
 		return media.offerSDP(local)
 	}
-	rate := 8000
-	if codec == "AMR-WB" {
-		rate = 16000
-	}
 	return media.buildSDP(local, strconv.Itoa(int(payload)), []string{
-		fmt.Sprintf("a=rtpmap:%d %s/%d", payload, codec, rate),
+		fmt.Sprintf("a=rtpmap:%d %s/8000", payload, codec),
 	})
 }
 
@@ -126,12 +116,6 @@ func (media *rtpMedia) buildSDP(local net.IP, formats string, attributes []strin
 		lines = append(lines,
 			"a=rtpmap:8 PCMA/8000",
 			"a=rtpmap:0 PCMU/8000",
-			"a=rtpmap:104 AMR-WB/16000",
-			"a=fmtp:104 mode-change-capability=2;max-red=220",
-			"a=rtpmap:102 AMR/8000",
-			"a=fmtp:102 mode-change-capability=2;max-red=220",
-			"a=rtpmap:100 telephone-event/8000",
-			"a=fmtp:100 0-15",
 		)
 	} else {
 		lines = append(lines, attributes...)
@@ -165,18 +149,13 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 				name = fmt.Sprintf("PAYLOAD-%d", parsed)
 			}
 		}
-		if name != "TELEPHONE-EVENT" {
+		if name == "PCMA" || name == "PCMU" {
 			codec, payload = name, byte(parsed)
 			break
 		}
 	}
-	if codec == "" && len(formats) > 0 {
-		if parsed, parseErr := strconv.Atoi(formats[0]); parseErr == nil {
-			codec, payload = fmt.Sprintf("PAYLOAD-%d", parsed), byte(parsed)
-		}
-	}
 	if codec == "" {
-		return errors.New("ims: remote SDP has no usable audio format")
+		return errors.New("ims: remote SDP has no supported audio format (PCMA or PCMU required)")
 	}
 	media.mu.Lock()
 	media.remote = &net.UDPAddr{IP: address, Port: port}
@@ -264,10 +243,13 @@ func (media *rtpMedia) WritePCM(samples []int16) error {
 		binary.BigEndian.PutUint32(packet[4:8], media.timestamp)
 		binary.BigEndian.PutUint32(packet[8:12], media.ssrc)
 		for index, sample := range media.pending[:rtpPacketSamples] {
-			if codec == "PCMA" {
+			switch codec {
+			case "PCMA":
 				packet[12+index] = linearToALaw(sample)
-			} else {
+			case "PCMU":
 				packet[12+index] = linearToMuLaw(sample)
+			default:
+				return fmt.Errorf("ims: unsupported negotiated RTP codec %q", codec)
 			}
 		}
 		if _, err := media.conn.WriteToUDP(packet, remote); err != nil {
@@ -306,11 +288,15 @@ func (media *rtpMedia) receive() {
 		if header >= count {
 			continue
 		}
+		if codec != "PCMA" && codec != "PCMU" {
+			continue
+		}
 		samples := make([]int16, count-header)
 		for index, encoded := range packet[header:count] {
-			if codec == "PCMA" {
+			switch codec {
+			case "PCMA":
 				samples[index] = aLawToLinear(encoded)
-			} else {
+			case "PCMU":
 				samples[index] = muLawToLinear(encoded)
 			}
 		}

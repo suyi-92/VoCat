@@ -15,6 +15,7 @@
 
 <p align="center">
   <img alt="Linux" src="https://img.shields.io/badge/Linux-amd64_%7C_386_%7C_arm64_%7C_aarch64_%7C_armv7-FCC624?style=flat-square&logo=linux&logoColor=111111">
+  <img alt="Windows 11" src="https://img.shields.io/badge/Windows_11-amd64_%7C_arm64-0078D4?style=flat-square&logo=windows11&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-Multi--Arch-2496ED?style=flat-square&logo=docker&logoColor=white">
   <img alt="WiFi Calling" src="https://img.shields.io/badge/WiFi_Calling-IMS_SMS-7B1FA2?style=flat-square">
   <img alt="eSIM" src="https://img.shields.io/badge/eSIM-LPA_%2F_eUICC-009688?style=flat-square">
@@ -24,7 +25,7 @@
 
 **English** | [العربية](docs/README.ar.md) | [简体中文](docs/README.zh-CN.md) | [繁體中文](docs/README.zh-TW.md) | [Français](docs/README.fr.md) | [Русский](docs/README.ru.md) | [Español](docs/README.es.md) | [日本語](docs/README.ja.md)
 
-Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
+Vocat is a source-available Web control panel and engineering toolkit for Quectel EC20/EC25-class cellular modems and CCID eUICC readers. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
 
 The backend is written in Go, the interface is built with React and TypeScript, and the production frontend is embedded into the Go binary. A single executable contains the web application and uses SQLite for persistent state.
 
@@ -48,7 +49,7 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Notifications | New inbound SMS forwarding through Telegram, Bark, email, Pushplus, and signed webhooks. Each SMS is delivered as an individual notification. |
 | Telegram bot | Device status, installed-profile listing and switching, WiFi Calling controls, and SMS sending. Sensitive actions require administrator confirmation. |
 | Operations | Authentication, CSRF protection, access policies, audit events, live logs, log retention, health checks, responsive layout, dark mode, and English/Chinese application UI. |
-| Distribution | Static Linux binaries, systemd installation script, self-update with SHA-256 verification, Docker image, GHCR publishing, and GitHub Actions release builds. |
+| Distribution | Static Linux and native Windows 11 binaries, Linux self-update with SHA-256 verification, systemd installation, Docker/GHCR publishing, and GitHub Actions release builds. |
 
 ## Supported hardware
 
@@ -60,6 +61,12 @@ Vocat targets Qualcomm-based Quectel modules that expose compatible AT, QMI, ser
 - Compatible EG600 and related modules
 
 Available features depend on the module firmware, USB composition, SIM/eSIM capabilities, host drivers, radio network, and carrier configuration.
+
+Native Windows 11 also supports standards-compliant CCID eUICC readers through
+Windows PC/SC. The verified `VID_04D9&PID_C001` device exposes its card reader
+as `SCR Prime 0`; it is a CCID/DFU/vendor-specific composite device, not a
+Quectel modem. See [Windows 11 native deployment](docs/WINDOWS.md) for the
+interface map, installation procedure, and feature boundaries.
 
 ## Installation
 
@@ -131,6 +138,8 @@ Download the matching binary and `SHA256SUMS` from GitHub Releases:
 | Linux ARM64 | `vocat-linux-arm64` |
 | Linux AArch64 | `vocat-linux-aarch64` |
 | Linux ARMv7 | `vocat-linux-armv7` |
+| Windows 11 x86-64 | `vocat-windows-amd64.exe` |
+| Windows 11 ARM64 | `vocat-windows-arm64.exe` |
 
 Verify and install it:
 
@@ -150,6 +159,13 @@ This manual command runs Vocat in the foreground. Use `vocat serve` so the
 process starts the server directly; running `vocat` without arguments as root
 on a TTY opens the interactive management menu instead. Use the one-click
 installer when a managed systemd service and automatic restart are required.
+
+### Native Windows 11
+
+Windows uses `winscard.dll` for PC/SC eUICC access, Wintun for the negotiated
+VoWiFi tunnel, and WFP Manual IPsec for IMS. Download the matching Windows
+release binary and follow [docs/WINDOWS.md](docs/WINDOWS.md). The repository
+does not bundle `wintun.dll`.
 
 ### Docker
 
@@ -203,10 +219,11 @@ The GHCR image is published for `linux/amd64` and `linux/arm64`.
 
 ### USB SIM readers
 
-USB SIM readers use the Linux PC/SC service. The one-click installer installs
-and starts `pcscd` plus the CCID driver automatically on supported package
-managers. On Debian/Ubuntu, the equivalent manual setup is
-`apt install pcscd libccid`. If USB sees a CCID reader but PC/SC is unavailable,
+On Windows 11, USB SIM/eUICC readers use the native Smart Card service and
+`winscard.dll`; no `pcscd` installation is required. On Linux, readers use the
+PC/SC service. The one-click installer installs and starts `pcscd` plus the
+CCID driver automatically on supported package managers. On Debian/Ubuntu, the
+equivalent manual setup is `apt install pcscd libccid`. If USB sees a CCID reader but PC/SC is unavailable,
 VoCat keeps the reader visible in the add-device dialog and reports the missing
 service or driver instead of silently hiding it.
 
@@ -277,7 +294,11 @@ Install the latest release:
 sudo vocat update --repo MengMengCode/VoCat
 ```
 
-The updater downloads the binary matching the current Linux architecture, verifies it with the published `SHA256SUMS`, replaces the executable atomically, and restarts the `vocat` systemd service when available.
+On supported Linux installations, the updater downloads the matching binary,
+verifies it with the published `SHA256SUMS`, replaces the executable
+atomically, and restarts the `vocat` systemd service when available. Windows
+supports `--check` but deliberately requires the stopped `.exe` to be replaced
+manually; see [the Windows update procedure](docs/WINDOWS.md#updating-on-windows).
 
 For Docker installations:
 
@@ -328,7 +349,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 Pushing a version tag starts two GitHub Actions workflows:
 
-- `release-binaries` builds and publishes `amd64`, `386`, `arm64`, `aarch64`, and `armv7` binaries plus `SHA256SUMS`.
+- `release-binaries` builds and publishes Linux `amd64`, `386`, `arm64`, `aarch64`, and `armv7` binaries plus Windows `amd64` and `arm64` binaries and `SHA256SUMS`.
 - `docker` builds and publishes a multi-architecture image to GitHub Container Registry.
 
 ```bash
@@ -346,6 +367,7 @@ internal/server/            HTTP API, notifications, and embedded web server
 internal/store/             SQLite persistence
 internal/update/            GitHub Release self-updater
 internal/vowifi/            IKE, EAP-AKA, IMS, and WiFi Calling runtime
+docs/WINDOWS.md             Native Windows 11 installation and support boundary
 scripts/install.sh          Linux installer and updater
 web/src/                    React and TypeScript frontend
 .github/workflows/          Binary and Docker release automation
@@ -383,6 +405,6 @@ cd web && npm run build
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](LICENSE), [MODIFICATIONS.md](MODIFICATIONS.md), and [NOTICE](NOTICE).
 
 [![MengMengCode/VoCat Star History](https://mengmeng.meteor-history.com/api/embed/MengMengCode/VoCat.svg?sig=sdeXRVxAoY3yLWgXL7JViY2USYIN3t9neJ6ScPvgUAo&theme=light&style=xkcd&color=dd4528&background=ffffff&textColor=000000&width=900&height=600&lineWidth=3&showTitle=true&showLegend=true&showDots=false&v=0.0.14)](https://meteor-history.com)

@@ -74,6 +74,7 @@ func runDoctor(args []string) error {
 	} else {
 		add("host", "passed", "native_host", "No WSL kernel marker detected", nil)
 	}
+	report.Checks = append(report.Checks, doctorPlatformChecks()...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -86,7 +87,9 @@ func runDoctor(args []string) error {
 	}
 
 	candidates, discoverErr := modem.NewSystemDiscoverer().Discover(ctx)
-	if discoverErr != nil {
+	if errors.Is(discoverErr, modem.ErrUnsupportedPlatform) {
+		add("modem_discovery", "warning", "native_modem_unsupported", "Native USB modem discovery is unavailable on this platform; PC/SC-only eSIM and VoWiFi devices remain supported", nil)
+	} else if discoverErr != nil {
 		add("modem_discovery", "failed", "modem_discovery_failed", discoverErr.Error(), nil)
 	} else if len(candidates) == 0 {
 		add("modem_discovery", "warning", "no_modem", "No USB modem was discovered", nil)

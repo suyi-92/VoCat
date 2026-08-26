@@ -21,6 +21,7 @@ export interface UpdateInfo {
   latestVersion?: string;
   releaseNote?: string;
   isDocker?: boolean;
+  inPlaceUpdateSupported?: boolean;
 }
 
 function CardDecor() {
@@ -161,7 +162,7 @@ export function SystemInfoCard({
               {updateInfo.releaseNote || t("暂无更新说明")}
             </div>
             <Button variant="warning" loading={applyingUpdate} onClick={onApplyUpdate} className="w-full !border-0">
-              {t("立即更新并重启")}
+              {updateInfo.inPlaceUpdateSupported === false ? t("手动更新") : t("立即更新并重启")}
             </Button>
           </div>
         ) : null}

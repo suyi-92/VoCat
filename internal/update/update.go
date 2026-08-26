@@ -1,8 +1,8 @@
-// Package update implements the `vocat update` self-updater. It queries the
-// GitHub Releases API for a newer build, downloads the matching Linux binary
-// for the current architecture, verifies it against a published SHA256SUMS,
-// atomically replaces the running binary on disk, and restarts the vocat
-// systemd unit.
+// Package update implements release checks and the `vocat update` self-updater.
+// It queries the GitHub Releases API, downloads a matching binary, verifies it
+// against a published SHA256SUMS, and atomically replaces supported installs.
+// Windows builds deliberately support release checks only because replacing a
+// mapped executable in place is not a reliable or atomic update mechanism.
 //
 // Trust model: GitHub TLS guarantees the channel; the repository owner controls
 // which assets are published; SHA256SUMS guards integrity. There is no GPG
@@ -14,6 +14,7 @@ package update
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,6 +30,17 @@ import (
 
 	"vocat/internal/buildinfo"
 )
+
+// ErrInPlaceUpdateUnsupported reports that the current platform must be
+// updated while VoCat is stopped. Callers can use errors.Is to present a
+// manual-update response instead of treating this as a download failure.
+var ErrInPlaceUpdateUnsupported = errors.New("update: in-place binary replacement is not supported on this platform; stop VoCat, verify the release binary against SHA256SUMS, and replace the executable manually")
+
+// SupportsInPlaceApply lets the HTTP API and Web UI describe the platform's
+// update behavior before an operator attempts to apply a release.
+func SupportsInPlaceApply() bool {
+	return inPlaceUpdateSupported()
+}
 
 // Options captures the resolved flags for an update invocation.
 type Options struct {
@@ -118,6 +130,9 @@ func ApplyLatest(ctx context.Context, logger *slog.Logger, opts Options, restart
 }
 
 func applyUpdate(ctx context.Context, logger *slog.Logger, opts Options, release *Release, latest string, restart bool) error {
+	if !inPlaceUpdateSupported() {
+		return ErrInPlaceUpdateUnsupported
+	}
 	assetNames := assetNamesFor(runtime.GOOS, runtime.GOARCH)
 	var asset *Asset
 	for _, name := range assetNames {
@@ -408,6 +423,9 @@ func findAsset(release *Release, name string) *Asset {
 }
 
 func assetNamesFor(goos, goarch string) []string {
+	if goos == "windows" {
+		return []string{fmt.Sprintf("vocat-windows-%s.exe", goarch)}
+	}
 	if goos == "linux" && goarch == "arm64" {
 		// AArch64 and arm64 name the same instruction set. Prefer the historic
 		// release name and accept the explicit architecture alias as fallback.
@@ -424,7 +442,9 @@ func assetNamesFor(goos, goarch string) []string {
 func printUpdateUsage() {
 	fmt.Println(`Usage: vocat update [flags]
 
-Fetch the latest release from GitHub and replace this binary in place.
+Fetch release information from GitHub. Supported Unix-like installations can
+replace the binary in place. Windows builds support --check only; stop VoCat,
+verify the matching release .exe against SHA256SUMS, and replace it manually.
 
 Flags:
   --check            Report whether an update is available, then exit.

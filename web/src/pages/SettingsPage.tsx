@@ -361,12 +361,13 @@ export default function SettingsPage() {
     setCheckingUpdate(true);
     try {
       // vocat 后端返回 {available, version, message}（参考实现是 has_update 等）
-      const data = await api<{ available?: boolean; version?: string; message?: string; is_docker?: boolean }>("/system/update/check");
+      const data = await api<{ available?: boolean; version?: string; message?: string; isDocker?: boolean; inPlaceUpdateSupported?: boolean }>("/system/update/check");
       const info: UpdateInfo = {
         hasUpdate: !!data?.available,
         latestVersion: data?.version,
         releaseNote: data?.message,
-        isDocker: !!data?.is_docker,
+        isDocker: !!data?.isDocker,
+        inPlaceUpdateSupported: data?.inPlaceUpdateSupported !== false,
       };
       setUpdateInfo(info);
       if (!info.hasUpdate) message.info(data?.message || t("当前已是最新版本"));
@@ -384,6 +385,16 @@ export default function SettingsPage() {
         lang === "zh"
           ? "检测到当前系统运行在 Docker 环境下。不建议在容器内直接执行文件热替换，请拉取最新镜像（如 docker pull vocat:latest）并重启容器来完成升级！"
           : "The system is running inside Docker. In-place binary replacement is not recommended; pull the latest image (e.g. docker pull vocat:latest) and restart the container to upgrade!",
+        t("环境警告"),
+        { confirmText: t("知道了"), type: "warning" },
+      );
+      return;
+    }
+    if (updateInfo.inPlaceUpdateSupported === false) {
+      await confirmDialog(
+        lang === "zh"
+          ? "Windows 不支持可靠地覆盖正在运行的 vocat.exe。请下载对应架构的 Release 文件与 SHA256SUMS，校验后退出 VoCat，再手动替换可执行文件。"
+          : "Windows cannot reliably replace a running vocat.exe. Download the matching release file and SHA256SUMS, verify them, stop VoCat, and replace the executable manually.",
         t("环境警告"),
         { confirmText: t("知道了"), type: "warning" },
       );

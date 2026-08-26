@@ -1,0 +1,54 @@
+name: windows-native
+
+on:
+  push:
+    branches:
+      - master
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded web UI
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test Windows packages
+        run: go test ./...
+      - name: Build and smoke-test Windows binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $buildTime = git show -s --format=%cI HEAD
+          go build -trimpath `
+            -ldflags "-s -w -X vocat/internal/buildinfo.BuildTime=$buildTime" `
+            -o dist/vocat-windows-amd64.exe `
+            ./cmd/vocat
+          & ./dist/vocat-windows-amd64.exe version
+      - name: Upload Windows smoke binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-amd64
+          path: dist/vocat-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 7

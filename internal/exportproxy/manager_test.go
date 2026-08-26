@@ -25,7 +25,7 @@ func TestManagerPersistsAndDeletesDisabledConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := manager.Create(ctx, Config{DeviceID: "modem-1", Mode: "socks5", ListenHost: "127.0.0.1", ListenPort: 1080})
+	created, err := manager.Create(ctx, Config{DeviceID: "modem-1", Mode: "socks5", ListenHost: "127.0.0.1", ListenPort: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestManagerEnabledConfigForDevice(t *testing.T) {
 		t.Fatal("reported an enabled config before any was created")
 	}
 	// A disabled config bound to modem-1 must not count.
-	if _, err := manager.Create(ctx, Config{DeviceID: "modem-1", Mode: "socks5", ListenHost: "127.0.0.1", ListenPort: 1080}); err != nil {
+	if _, err := manager.Create(ctx, Config{DeviceID: "modem-1", Mode: "socks5", ListenHost: "127.0.0.1", ListenPort: 0}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := manager.EnabledConfigForDevice("modem-1"); ok {

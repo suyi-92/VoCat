@@ -357,6 +357,7 @@ export const EN_DICT: Record<string, string> = {
   "正在更新...": "Updating...",
   应用更新: "Apply Update",
   应用更新失败: "Failed to apply the update",
+  手动更新: "Manual Update",
   立即更新: "Update Now",
   知道了: "Got It",
   环境警告: "Environment Warning",

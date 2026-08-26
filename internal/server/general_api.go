@@ -395,12 +395,13 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
-			"available":       result.Available,
-			"current_version": result.Current,
-			"version":         result.Latest,
-			"message":         message,
-			"repository":      s.updateRepository,
-			"is_docker":       runningInDocker(),
+			"available":                 result.Available,
+			"current_version":           result.Current,
+			"version":                   result.Latest,
+			"message":                   message,
+			"repository":                s.updateRepository,
+			"is_docker":                 runningInDocker(),
+			"in_place_update_supported": update.SupportsInPlaceApply(),
 		},
 	})
 }
@@ -450,6 +451,10 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		Token: s.updateToken,
 	}, false)
 	if err != nil {
+		if errors.Is(err, update.ErrInPlaceUpdateUnsupported) {
+			writeError(w, http.StatusConflict, "manual_update_required", err.Error())
+			return
+		}
 		s.logger.Error("apply update failed", "repository", s.updateRepository, "error", err)
 		writeError(w, http.StatusBadGateway, "update_apply_failed", err.Error())
 		return

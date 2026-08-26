@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 )
 
 type clientStep struct {
@@ -212,6 +213,7 @@ func newStartedTestManager(
 			},
 		}}},
 		Opener:         opener,
+		CardReaders:    pcsc.NewWithBackend(testPCSCBackend{}),
 		CommandTimeout: time.Second,
 		LongTimeout:    time.Second,
 	})
