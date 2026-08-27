@@ -103,6 +103,59 @@ func TestBuildWindowsIPSecPlanUsesTwoBidirectionalSAPairs(t *testing.T) {
 	}
 }
 
+func TestBuildWindowsIPSecPlanRejectsInvalidInboundSPIs(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(*IPSecSAConfig)
+		want   string
+	}{
+		{
+			name: "reserved UE-client SPI",
+			update: func(config *IPSecSAConfig) {
+				config.UEClientSPI = 254
+			},
+			want: "reserved",
+		},
+		{
+			name: "odd UE-client SPI",
+			update: func(config *IPSecSAConfig) {
+				config.UEClientSPI |= 1
+			},
+			want: "must be even",
+		},
+		{
+			name: "reserved UE-server SPI",
+			update: func(config *IPSecSAConfig) {
+				config.UEServerSPI = 254
+			},
+			want: "reserved",
+		},
+		{
+			name: "odd UE-server SPI",
+			update: func(config *IPSecSAConfig) {
+				config.UEServerSPI |= 1
+			},
+			want: "must be even",
+		},
+		{
+			name: "duplicate UE SPI",
+			update: func(config *IPSecSAConfig) {
+				config.UEServerSPI = config.UEClientSPI
+			},
+			want: "must be unique",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := testIPSecSAConfig()
+			test.update(&config)
+			if _, err := buildWindowsIPSecPlan(config); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildWindowsIPSecPlan() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildWindowsWFPFilterUsesExactIMSFlow(t *testing.T) {
 	plan, err := buildWindowsIPSecPlan(testIPSecSAConfig())
 	if err != nil {
@@ -152,12 +205,17 @@ func TestWindowsIPSecAddressRepresentations(t *testing.T) {
 		t.Fatalf("IPv4 representation = %d/%x", version, ipv4)
 	}
 
-	ip := net.ParseIP("2001:db8::102:304").To16()
+	ip := net.ParseIP("2001:db8:1122:3344:5566:7788:99aa:bbcc").To16()
 	version, ipv6, err := windowsIPSecAddress(ip)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append([]byte(nil), ip...)
+	want := []byte{
+		0xcc, 0xbb, 0xaa, 0x99,
+		0x88, 0x77, 0x66, 0x55,
+		0x44, 0x33, 0x22, 0x11,
+		0xb8, 0x0d, 0x01, 0x20,
+	}
 	if version != wfpIPVersionV6 || !reflect.DeepEqual(ipv6[:], want) {
 		t.Fatalf("IPv6 representation = %d/%x, want %x", version, ipv6, want)
 	}
@@ -292,6 +350,124 @@ func TestWindowsIPSecInstallerRollsBackPartialInstall(t *testing.T) {
 	}
 }
 
+func TestWindowsIPSecInstallerRetriesTransientRollbackFailure(t *testing.T) {
+	sentinel := errors.New("injected WFP install/rollback failure")
+	api := &fakeWindowsWFPAPI{
+		failOperation: "add-outbound",
+		failErr:       sentinel,
+		failures:      map[string]int{"close": 1},
+	}
+	handle, err := (windowsIPSecInstaller{api: api}).Install(
+		context.Background(),
+		testIPSecSAConfig(),
+	)
+	if handle != nil {
+		t.Fatal("partial install returned a handle")
+	}
+	if !errors.Is(err, ErrIPSecInstall) || !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v", err)
+	}
+	wantTail := []string{
+		"delete-context:101", "delete-filter:2", "delete-filter:1",
+		"delete-sublayer", "close", "close",
+	}
+	if got := api.operations[len(api.operations)-len(wantTail):]; !reflect.DeepEqual(got, wantTail) {
+		t.Fatalf("bounded rollback operations = %v, want %v", got, wantTail)
+	}
+}
+
+func TestWindowsIPSecInstallerBoundsPersistentRollbackFailure(t *testing.T) {
+	sentinel := errors.New("injected persistent WFP install/rollback failure")
+	api := &fakeWindowsWFPAPI{
+		failOperation: "add-outbound",
+		failErr:       sentinel,
+		failures:      map[string]int{"close": abandonedIPSecCloseAttempts + 1},
+	}
+	handle, err := (windowsIPSecInstaller{api: api}).Install(
+		context.Background(),
+		testIPSecSAConfig(),
+	)
+	if handle != nil {
+		t.Fatal("partial install returned a handle")
+	}
+	if !errors.Is(err, ErrIPSecInstall) || !errors.Is(err, sentinel) ||
+		!strings.Contains(err.Error(), "bounded attempts") {
+		t.Fatalf("error = %v", err)
+	}
+	closeCount := 0
+	for _, operation := range api.operations {
+		if operation == "close" {
+			closeCount++
+		}
+	}
+	if closeCount != abandonedIPSecCloseAttempts {
+		t.Fatalf("persistent rollback close attempts = %d, want %d", closeCount, abandonedIPSecCloseAttempts)
+	}
+}
+
+func TestWindowsIPSecCloseRetriesOnlyUnfinishedCleanup(t *testing.T) {
+	sentinel := errors.New("injected transient WFP cleanup failure")
+	api := &fakeWindowsWFPAPI{}
+	installed, err := (windowsIPSecInstaller{api: api}).Install(context.Background(), testIPSecSAConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := installed.(*windowsIPSecHandle)
+	api.failErr = sentinel
+	api.failures = map[string]int{
+		"delete-context:102": 1,
+		"delete-filter:4":    1,
+		"delete-sublayer":    1,
+		"close":              1,
+	}
+	if err := handle.Close(context.Background()); !errors.Is(err, sentinel) {
+		t.Fatalf("first close error = %v, want transient failure", err)
+	}
+	if handle.closed || handle.engine == 0 ||
+		!reflect.DeepEqual(handle.contextIDs, []uint64{102}) ||
+		!reflect.DeepEqual(handle.filterIDs, []uint64{4}) ||
+		!handle.subLayerAdded {
+		t.Fatalf(
+			"failed cleanup state: closed=%v engine=%v contexts=%v filters=%v sublayer=%v",
+			handle.closed,
+			handle.engine,
+			handle.contextIDs,
+			handle.filterIDs,
+			handle.subLayerAdded,
+		)
+	}
+	beforeRetry := len(api.operations)
+	if err := handle.Close(context.Background()); err != nil {
+		t.Fatalf("retry close: %v", err)
+	}
+	wantRetry := []string{"delete-context:102", "delete-filter:4", "delete-sublayer", "close"}
+	if got := api.operations[beforeRetry:]; !reflect.DeepEqual(got, wantRetry) {
+		t.Fatalf("retry operations = %v, want %v", got, wantRetry)
+	}
+	if !handle.closed || handle.engine != 0 || len(handle.contextIDs) != 0 ||
+		len(handle.filterIDs) != 0 || handle.subLayerAdded {
+		t.Fatalf("successful retry retained WFP state: %#v", handle)
+	}
+}
+
+func TestWindowsIPSecCloseUsesDynamicSessionAsCleanupFallback(t *testing.T) {
+	sentinel := errors.New("injected explicit delete failure")
+	api := &fakeWindowsWFPAPI{}
+	installed, err := (windowsIPSecInstaller{api: api}).Install(context.Background(), testIPSecSAConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := installed.(*windowsIPSecHandle)
+	api.failErr = sentinel
+	api.failures = map[string]int{"delete-context:102": 1}
+	if err := handle.Close(context.Background()); err != nil {
+		t.Fatalf("dynamic engine close should finish cleanup: %v", err)
+	}
+	if !handle.closed || handle.engine != 0 || len(handle.contextIDs) != 0 {
+		t.Fatalf("dynamic-session cleanup state = %#v", handle)
+	}
+}
+
 func conditionValue(t *testing.T, conditions []wfpFilterCondition0, key windows.GUID) uintptr {
 	t.Helper()
 	for _, condition := range conditions {
@@ -312,10 +488,15 @@ type fakeWindowsWFPAPI struct {
 	filterSubLayerKeys []windows.GUID
 	failOperation      string
 	failErr            error
+	failures           map[string]int
 }
 
 func (api *fakeWindowsWFPAPI) operation(name string) error {
 	api.operations = append(api.operations, name)
+	if api.failures[name] > 0 {
+		api.failures[name]--
+		return api.failErr
+	}
 	if name == api.failOperation {
 		return api.failErr
 	}

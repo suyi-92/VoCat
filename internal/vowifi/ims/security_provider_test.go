@@ -26,6 +26,8 @@ type fakeIPSecHandle struct {
 	mu              sync.Mutex
 	closeCount      int
 	closeContextErr error
+	closeFailures   int
+	closeErr        error
 }
 
 func (installer *fakeIPSecInstaller) Install(
@@ -59,6 +61,10 @@ func (handle *fakeIPSecHandle) Close(ctx context.Context) error {
 	defer handle.mu.Unlock()
 	handle.closeCount++
 	handle.closeContextErr = ctx.Err()
+	if handle.closeFailures > 0 {
+		handle.closeFailures--
+		return handle.closeErr
+	}
 	return nil
 }
 
@@ -97,6 +103,92 @@ func TestSessionCloseCleansIPSecAfterCallerDeadline(t *testing.T) {
 	}
 	if err := handle.contextError(); err != nil {
 		t.Fatalf("IPsec cleanup inherited expired caller context: %v", err)
+	}
+}
+
+func TestSessionCloseRetriesFailedIPSecCleanup(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	refreshDone := make(chan struct{})
+	close(refreshDone)
+	want := errors.New("transient IPsec cleanup failure")
+	handle := &fakeIPSecHandle{closeFailures: 1, closeErr: want}
+	session := &Session{
+		conn:          client,
+		refreshCancel: func() {},
+		refreshDone:   refreshDone,
+		ipsecHandle:   handle,
+		calls:         make(map[string]*imsCall),
+	}
+	if err := session.Close(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("first Close() error = %v, want transient failure", err)
+	}
+	if handle.closes() != 1 || session.ipsecHandle == nil {
+		t.Fatalf("failed IPsec cleanup was not retained: closes=%d handle=%#v", handle.closes(), session.ipsecHandle)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close(): %v", err)
+	}
+	if handle.closes() != 2 || session.ipsecHandle != nil {
+		t.Fatalf("retry state: closes=%d handle=%#v", handle.closes(), session.ipsecHandle)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("idempotent Close(): %v", err)
+	}
+	if handle.closes() != 2 {
+		t.Fatalf("completed cleanup retried %d times", handle.closes())
+	}
+}
+
+func TestSessionAbortRetriesFailedIPSecCleanup(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	want := errors.New("transient abandoned IPsec cleanup failure")
+	handle := &fakeIPSecHandle{closeFailures: 1, closeErr: want}
+	session := &Session{
+		conn:          client,
+		refreshCancel: func() {},
+		ipsecHandle:   handle,
+	}
+	if err := session.abort(); err != nil {
+		t.Fatalf("abort() error = %v", err)
+	}
+	if handle.closes() != 2 {
+		t.Fatalf("IPsec close count = %d, want 2", handle.closes())
+	}
+	if session.ipsecHandle != nil {
+		t.Fatalf("successful retry retained IPsec handle %#v", session.ipsecHandle)
+	}
+	if err := handle.contextError(); err != nil {
+		t.Fatalf("IPsec cleanup used an expired context: %v", err)
+	}
+}
+
+func TestSessionAbortBoundsPersistentIPSecCleanupFailure(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	want := errors.New("persistent abandoned IPsec cleanup failure")
+	handle := &fakeIPSecHandle{
+		closeFailures: abandonedIPSecCloseAttempts + 1,
+		closeErr:      want,
+	}
+	session := &Session{
+		conn:          client,
+		refreshCancel: func() {},
+		ipsecHandle:   handle,
+	}
+	if err := session.abort(); !errors.Is(err, want) {
+		t.Fatalf("abort() error = %v, want persistent cleanup failure", err)
+	}
+	if handle.closes() != abandonedIPSecCloseAttempts {
+		t.Fatalf(
+			"IPsec close count = %d, want bounded %d",
+			handle.closes(),
+			abandonedIPSecCloseAttempts,
+		)
+	}
+	if session.ipsecHandle == nil {
+		t.Fatal("failed bounded cleanup discarded the IPsec handle prematurely")
 	}
 }
 

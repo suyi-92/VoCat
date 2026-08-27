@@ -17,15 +17,41 @@ import (
 const (
 	rtpClockRate     = 8000
 	rtpPacketSamples = 160
+	rtpRouteTimeout  = 5 * time.Second
 )
 
+type mediaRouteManager interface {
+	AcquireMediaRoute(context.Context, net.IP, uint16, uint16) error
+	ReleaseMediaRoute(context.Context, net.IP) error
+}
+
+type unavailableMediaRouteManager struct{}
+
+func (unavailableMediaRouteManager) AcquireMediaRoute(
+	context.Context,
+	net.IP,
+	uint16,
+	uint16,
+) error {
+	return errors.New("ims: user-space tunnel does not expose dynamic media-route control")
+}
+
+func (unavailableMediaRouteManager) ReleaseMediaRoute(context.Context, net.IP) error {
+	return nil
+}
+
 type rtpMedia struct {
-	conn *net.UDPConn
+	conn         *net.UDPConn
+	routeManager mediaRouteManager
+	routeMu      sync.Mutex
+	routeIP      net.IP
+	routeRefs    []net.IP
 
 	mu          sync.RWMutex
 	remote      *net.UDPAddr
 	codec       string
 	payloadType byte
+	generation  uint64
 
 	writeMu   sync.Mutex
 	pending   []int16
@@ -36,9 +62,17 @@ type rtpMedia struct {
 	downlink chan []int16
 	closed   chan struct{}
 	close    sync.Once
+	closeErr error
 }
 
-func newRTPMedia(local net.IP) (*rtpMedia, error) {
+type rtpNegotiationSnapshot struct {
+	remote      *net.UDPAddr
+	codec       string
+	payloadType byte
+	generation  uint64
+}
+
+func newRTPMedia(local net.IP, routeManagers ...mediaRouteManager) (*rtpMedia, error) {
 	address := &net.UDPAddr{IP: local, Port: 0}
 	connection, err := net.ListenUDP("udp", address)
 	if err != nil {
@@ -49,10 +83,14 @@ func newRTPMedia(local net.IP) (*rtpMedia, error) {
 		_ = connection.Close()
 		return nil, fmt.Errorf("ims: initialize RTP state: %w", err)
 	}
+	var routeManager mediaRouteManager
+	if len(routeManagers) > 0 {
+		routeManager = routeManagers[0]
+	}
 	media := &rtpMedia{
 		conn: connection, sequence: binary.BigEndian.Uint16(seed[:2]),
 		timestamp: binary.BigEndian.Uint32(seed[2:6]), ssrc: binary.BigEndian.Uint32(seed[6:]),
-		downlink: make(chan []int16, 64), closed: make(chan struct{}),
+		downlink: make(chan []int16, 64), closed: make(chan struct{}), routeManager: routeManager,
 	}
 	go media.receive()
 	return media, nil
@@ -157,12 +195,111 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	if codec == "" {
 		return errors.New("ims: remote SDP has no supported audio format (PCMA or PCMU required)")
 	}
+	address = append(net.IP(nil), address...)
+	localPort := media.conn.LocalAddr().(*net.UDPAddr).Port
+	if localPort < 1 || localPort > 65535 {
+		return errors.New("ims: local RTP socket has an invalid port")
+	}
+
+	media.routeMu.Lock()
+	defer media.routeMu.Unlock()
+	select {
+	case <-media.closed:
+		return io.EOF
+	default:
+	}
+	if err = media.acquireRouteReference(address, uint16(localPort), uint16(port)); err != nil {
+		return fmt.Errorf("ims: authorize remote RTP route: %w", err)
+	}
+	oldRouteIP := append(net.IP(nil), media.routeIP...)
+
+	if media.routeManager != nil && oldRouteIP != nil {
+		releaseErr := media.releaseRouteReference(oldRouteIP)
+		if releaseErr != nil {
+			// The negotiated endpoint is committed only after its replacement
+			// route is authorized and the previous reference is retired.
+			rollbackErr := media.releaseRouteReference(address)
+			return errors.Join(
+				fmt.Errorf("ims: release previous RTP route: %w", releaseErr),
+				wrapMediaRouteReleaseError("roll back new RTP route", rollbackErr),
+			)
+		}
+	}
+	media.routeIP = append(net.IP(nil), address...)
 	media.mu.Lock()
 	media.remote = &net.UDPAddr{IP: address, Port: port}
 	media.codec = codec
 	media.payloadType = payload
+	media.generation++
 	media.mu.Unlock()
 	return nil
+}
+
+func (media *rtpMedia) acquireRouteReference(address net.IP, sourcePort, destinationPort uint16) error {
+	if media.routeManager == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rtpRouteTimeout)
+	err := media.routeManager.AcquireMediaRoute(ctx, address, sourcePort, destinationPort)
+	cancel()
+	if err == nil {
+		media.routeRefs = append(media.routeRefs, append(net.IP(nil), address...))
+	}
+	return err
+}
+
+func (media *rtpMedia) releaseRouteReference(address net.IP) error {
+	if media.routeManager == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rtpRouteTimeout)
+	err := media.routeManager.ReleaseMediaRoute(ctx, address)
+	cancel()
+	if err != nil {
+		return err
+	}
+	for index := len(media.routeRefs) - 1; index >= 0; index-- {
+		if media.routeRefs[index].Equal(address) {
+			media.routeRefs = append(media.routeRefs[:index], media.routeRefs[index+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func wrapMediaRouteReleaseError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("ims: %s: %w", operation, err)
+}
+
+func cloneUDPAddress(address *net.UDPAddr) *net.UDPAddr {
+	if address == nil {
+		return nil
+	}
+	result := *address
+	result.IP = append(net.IP(nil), address.IP...)
+	return &result
+}
+
+func (media *rtpMedia) negotiationSnapshot() rtpNegotiationSnapshot {
+	media.mu.RLock()
+	defer media.mu.RUnlock()
+	return rtpNegotiationSnapshot{
+		remote:      cloneUDPAddress(media.remote),
+		codec:       media.codec,
+		payloadType: media.payloadType,
+		generation:  media.generation,
+	}
+}
+
+func (media *rtpMedia) negotiationMatchesLocked(expected rtpNegotiationSnapshot) bool {
+	if media.generation != expected.generation || media.codec != expected.codec ||
+		media.payloadType != expected.payloadType || media.remote == nil || expected.remote == nil {
+		return false
+	}
+	return media.remote.IP.Equal(expected.remote.IP) && media.remote.Port == expected.remote.Port
 }
 
 func parseAudioSDP(body []byte) (net.IP, int, []string, map[int]string, error) {
@@ -269,59 +406,160 @@ func (media *rtpMedia) receive() {
 		if err != nil {
 			return
 		}
-		media.mu.Lock()
-		remote, codec, payload := media.remote, media.codec, media.payloadType
-		if remote != nil && remote.IP.Equal(source.IP) && remote.Port != source.Port {
-			remote.Port = source.Port // symmetric RTP/NAT port learning
+		media.handleRTPPacket(packet[:count], source)
+	}
+}
+
+func (media *rtpMedia) handleRTPPacket(packet []byte, source *net.UDPAddr) {
+	expected := media.negotiationSnapshot()
+	if expected.remote == nil || source == nil || !expected.remote.IP.Equal(source.IP) ||
+		(expected.codec != "PCMA" && expected.codec != "PCMU") {
+		return
+	}
+	payload, ok := parseRTPPayload(packet, expected.payloadType)
+	if !ok || !media.authorizeRTPSource(source, expected) {
+		return
+	}
+	samples := make([]int16, len(payload))
+	for index, encoded := range payload {
+		switch expected.codec {
+		case "PCMA":
+			samples[index] = aLawToLinear(encoded)
+		case "PCMU":
+			samples[index] = muLawToLinear(encoded)
 		}
-		media.mu.Unlock()
-		if remote == nil || !remote.IP.Equal(source.IP) || count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
-			continue
-		}
-		header := 12 + int(packet[0]&0x0f)*4
-		if packet[0]&0x10 != 0 {
-			if count < header+4 {
-				continue
-			}
-			header += 4 + int(binary.BigEndian.Uint16(packet[header+2:header+4]))*4
-		}
-		if header >= count {
-			continue
-		}
-		if codec != "PCMA" && codec != "PCMU" {
-			continue
-		}
-		samples := make([]int16, count-header)
-		for index, encoded := range packet[header:count] {
-			switch codec {
-			case "PCMA":
-				samples[index] = aLawToLinear(encoded)
-			case "PCMU":
-				samples[index] = muLawToLinear(encoded)
-			}
+	}
+	select {
+	case media.downlink <- samples:
+	default:
+		// Keep real-time behavior by dropping the oldest queued packet.
+		select {
+		case <-media.downlink:
+		default:
 		}
 		select {
 		case media.downlink <- samples:
 		default:
-			// Keep real-time behavior by dropping the oldest queued packet.
-			select {
-			case <-media.downlink:
-			default:
-			}
-			select {
-			case media.downlink <- samples:
-			default:
-			}
 		}
 	}
 }
 
+func parseRTPPayload(packet []byte, payloadType byte) ([]byte, bool) {
+	if len(packet) < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payloadType {
+		return nil, false
+	}
+	header := 12 + int(packet[0]&0x0f)*4
+	if header > len(packet) {
+		return nil, false
+	}
+	if packet[0]&0x10 != 0 {
+		if len(packet)-header < 4 {
+			return nil, false
+		}
+		extensionWords := int(binary.BigEndian.Uint16(packet[header+2 : header+4]))
+		if extensionWords > (len(packet)-header-4)/4 {
+			return nil, false
+		}
+		header += 4 + extensionWords*4
+	}
+	payloadEnd := len(packet)
+	if packet[0]&0x20 != 0 {
+		if payloadEnd <= header {
+			return nil, false
+		}
+		paddingLength := int(packet[payloadEnd-1])
+		if paddingLength == 0 || paddingLength > payloadEnd-header {
+			return nil, false
+		}
+		payloadEnd -= paddingLength
+	}
+	if payloadEnd <= header {
+		return nil, false
+	}
+	return packet[header:payloadEnd], true
+}
+
+func (media *rtpMedia) authorizeRTPSource(
+	source *net.UDPAddr,
+	expected rtpNegotiationSnapshot,
+) bool {
+	if source == nil || source.Port < 1 || source.Port > 65535 {
+		return false
+	}
+	media.routeMu.Lock()
+	defer media.routeMu.Unlock()
+	select {
+	case <-media.closed:
+		return false
+	default:
+	}
+
+	media.mu.Lock()
+	defer media.mu.Unlock()
+	if !media.negotiationMatchesLocked(expected) || !media.remote.IP.Equal(source.IP) {
+		return false
+	}
+	if media.remote.Port == source.Port {
+		return true
+	}
+
+	if media.routeManager != nil {
+		localPort := media.conn.LocalAddr().(*net.UDPAddr).Port
+		if localPort < 1 || localPort > 65535 {
+			return false
+		}
+		address := append(net.IP(nil), source.IP...)
+		if err := media.acquireRouteReference(address, uint16(localPort), uint16(source.Port)); err != nil {
+			return false
+		}
+		oldRouteIP := append(net.IP(nil), media.routeIP...)
+		if oldRouteIP != nil {
+			if err := media.releaseRouteReference(oldRouteIP); err != nil {
+				// The endpoint remains unchanged unless both acquiring the new TS
+				// authorization and retiring the old reference succeed. A failed
+				// rollback stays in routeRefs for a later Close retry.
+				_ = media.releaseRouteReference(address)
+				return false
+			}
+		}
+		media.routeIP = address
+	}
+	media.remote.Port = source.Port
+	media.generation++
+	return true
+}
+
 func (media *rtpMedia) Close() error {
+	media.routeMu.Lock()
+	defer media.routeMu.Unlock()
 	media.close.Do(func() {
 		close(media.closed)
-		_ = media.conn.Close()
+		var errs []error
+		if err := media.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			errs = append(errs, err)
+		}
+		media.closeErr = errors.Join(errs...)
 	})
-	return nil
+
+	var routeErrs []error
+	if media.routeManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), rtpRouteTimeout)
+		defer cancel()
+		for index := 0; index < len(media.routeRefs); {
+			address := append(net.IP(nil), media.routeRefs[index]...)
+			err := media.routeManager.ReleaseMediaRoute(ctx, address)
+			if err != nil {
+				routeErrs = append(routeErrs, fmt.Errorf("ims: release RTP route %s: %w", address, err))
+				index++
+				continue
+			}
+			media.routeRefs = append(media.routeRefs[:index], media.routeRefs[index+1:]...)
+		}
+	}
+	if len(media.routeRefs) == 0 {
+		media.routeIP = nil
+	}
+	return errors.Join(media.closeErr, errors.Join(routeErrs...))
 }
 
 func linearToMuLaw(sample int16) byte {

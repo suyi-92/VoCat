@@ -573,8 +573,9 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		provider.config.KeepaliveInterval,
 	)
 	cleanupPendingIKE = false
-	installed, err := provider.config.Installer.Install(ctx, ChildSAConfig{
+	childConfig := ChildSAConfig{
 		Name:               name,
+		DeviceID:           request.DeviceID,
 		OuterLocal:         append(net.IP(nil), transport.LocalAddr().IP...),
 		OuterRemote:        append(net.IP(nil), transport.RemoteAddr().IP...),
 		InnerLocalIPv4:     append(net.IP(nil), network.LocalIPv4...),
@@ -595,13 +596,14 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		UDPEncapsulation:   natDetected,
 		ProxyMode:          request.Proxy.Mode,
 		Relay:              relay,
-	})
+	}
+	installed, err := provider.config.Installer.Install(ctx, childConfig)
 	if err != nil {
-		_ = relay.CloseWithDelete(ctx)
+		_, _ = relay.CloseWithDelete(ctx)
 		return nil, fmt.Errorf("ike: install CHILD_SA: %w", err)
 	}
 	if installed == nil {
-		_ = relay.CloseWithDelete(ctx)
+		_, _ = relay.CloseWithDelete(ctx)
 		return nil, errors.New("ike: CHILD_SA installer returned a nil handle")
 	}
 	dataplaneMode := "unknown"
@@ -634,9 +636,11 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 			PCSCF:         ipStrings(network.PCSCF),
 			DataplaneMode: dataplaneMode,
 		},
-		child:     installed,
-		relay:     relay,
-		transport: transport,
+		child:       installed,
+		relay:       relay,
+		transport:   transport,
+		routePolicy: newMediaRoutePolicy(childConfig),
+		routeRefs:   make(map[string]int),
 	}
 	closeTransport = false
 	return session, nil
@@ -1042,13 +1046,16 @@ type NetworkEvidence struct {
 }
 
 type Session struct {
-	mu        sync.Mutex
-	evidence  vowifi.TunnelEvidence
-	network   NetworkEvidence
-	child     ChildSAHandle
-	relay     *sessionRelay
-	transport datagramTransport
-	closed    bool
+	mu          sync.Mutex
+	routeMu     sync.Mutex
+	evidence    vowifi.TunnelEvidence
+	network     NetworkEvidence
+	child       ChildSAHandle
+	relay       *sessionRelay
+	transport   datagramTransport
+	routePolicy mediaRoutePolicy
+	routeRefs   map[string]int
+	closed      bool
 }
 
 func (session *Session) Evidence() vowifi.TunnelEvidence {
@@ -1077,37 +1084,163 @@ func (session *Session) Failures() <-chan error {
 	return nil
 }
 
-func (session *Session) Close(ctx context.Context) error {
+// AcquireMediaRoute validates an SDP audio endpoint against the CHILD_SA's
+// negotiated traffic selectors, then acquires one reference to its tunnel
+// host route. sourcePort is the UE RTP port and destinationPort is the remote
+// RTP port; media is UDP by definition in the currently supported SDP mode.
+func (session *Session) AcquireMediaRoute(
+	ctx context.Context,
+	destination net.IP,
+	sourcePort uint16,
+	destinationPort uint16,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	destination, err := session.routePolicy.validate(destination, sourcePort, destinationPort)
+	if err != nil {
+		return err
+	}
+	key := destination.String()
+
+	session.routeMu.Lock()
+	defer session.routeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	session.mu.Lock()
-	if session.closed {
+	if session.closed || session.child == nil {
+		session.mu.Unlock()
+		return errors.New("ike: tunnel session is closed")
+	}
+	child := session.child
+	dataplaneMode := session.evidence.DataplaneMode
+	session.mu.Unlock()
+	if session.routeRefs[key] > 0 {
+		session.routeRefs[key]++
+		return nil
+	}
+	manager, dynamic := child.(ChildSADynamicRouteManager)
+	if !dynamic && dataplaneMode != "xfrm" {
+		return errors.New("ike: user-space CHILD_SA does not support dynamic media routes")
+	}
+	if dynamic {
+		if err := manager.AddRoute(ctx, destination); err != nil {
+			return fmt.Errorf("ike: add media tunnel route for %s: %w", destination, err)
+		}
+	}
+	if session.routeRefs == nil {
+		session.routeRefs = make(map[string]int)
+	}
+	session.routeRefs[key] = 1
+	return nil
+}
+
+// ReleaseMediaRoute releases one route reference. It is intentionally
+// idempotent after tunnel teardown because ChildSAHandle.Close already removes
+// every remaining platform route.
+func (session *Session) ReleaseMediaRoute(ctx context.Context, destination net.IP) error {
+	destination = canonicalRouteIP(destination)
+	if destination == nil {
+		return errors.New("ike: media route destination is invalid")
+	}
+	key := destination.String()
+
+	session.routeMu.Lock()
+	defer session.routeMu.Unlock()
+	session.mu.Lock()
+	if session.closed || session.child == nil {
 		session.mu.Unlock()
 		return nil
 	}
+	child := session.child
+	session.mu.Unlock()
+	count := session.routeRefs[key]
+	if count == 0 {
+		return nil
+	}
+	if count > 1 {
+		session.routeRefs[key] = count - 1
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if manager, ok := child.(ChildSADynamicRouteManager); ok {
+		if err := manager.RemoveRoute(ctx, destination); err != nil {
+			return fmt.Errorf("ike: remove media tunnel route for %s: %w", destination, err)
+		}
+	}
+	delete(session.routeRefs, key)
+	return nil
+}
+
+func (session *Session) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session.routeMu.Lock()
+	defer session.routeMu.Unlock()
+	session.mu.Lock()
 	session.closed = true
 	child := session.child
 	relay := session.relay
 	transport := session.transport
 	session.evidence.Established = false
-	session.child = nil
-	session.relay = nil
-	session.transport = nil
 	session.mu.Unlock()
+	// Any media-route operation that captured child completed before this
+	// point. New operations now observe closed, so platform teardown can run
+	// without holding Session.mu. Keep routeMu through teardown to serialize
+	// concurrent Close calls, and retain each owner handle until its Close has
+	// succeeded so a later call can resume partial cleanup.
 	var errs []error
+	childClosed := child == nil
 	if child != nil {
 		if err := child.Close(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("remove CHILD_SA: %w", err))
+		} else {
+			childClosed = true
 		}
 	}
+	relayConsumed := relay == nil
+	transportClosed := transport == nil
 	if relay != nil {
-		if err := relay.CloseWithDelete(ctx); err != nil {
+		var err error
+		transportClosed, err = relay.CloseWithDelete(ctx)
+		relayConsumed = true
+		if err != nil {
 			errs = append(errs, fmt.Errorf("close session relay: %w", err))
 		}
 	}
-	if transport != nil {
+	// CloseWithDelete consumes the relay even when protocol DELETE or local
+	// transport shutdown reports an error. If the transport did not confirm its
+	// close, retain it for a later direct retry; never invoke the consumed relay
+	// or immediately double-close the same transport in this attempt.
+	if relay == nil && transport != nil && !transportClosed {
 		if err := transport.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close IKE transport: %w", err))
+		} else {
+			transportClosed = true
 		}
 	}
+	session.mu.Lock()
+	if childClosed {
+		session.child = nil
+		session.routeRefs = nil
+	}
+	if relayConsumed {
+		session.relay = nil
+	}
+	if transportClosed {
+		session.transport = nil
+	}
+	session.mu.Unlock()
 	return errors.Join(errs...)
 }
 

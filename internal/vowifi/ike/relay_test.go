@@ -30,6 +30,10 @@ type fakeSessionTransport struct {
 	once          sync.Once
 	readers       atomic.Int32
 	maxReads      atomic.Int32
+	sendErr       error
+	sendCalls     atomic.Int32
+	closeErrors   []error
+	closeCalls    atomic.Int32
 }
 
 func newFakeSessionTransport() *fakeSessionTransport {
@@ -72,6 +76,10 @@ func (transport *fakeSessionTransport) SendSessionPacket(
 	packet []byte,
 	ike bool,
 ) error {
+	transport.sendCalls.Add(1)
+	if transport.sendErr != nil {
+		return transport.sendErr
+	}
 	select {
 	case transport.sent <- fakeSentPacket{data: append([]byte(nil), packet...), ike: ike}:
 		return nil
@@ -153,8 +161,82 @@ func TestSessionRelayCloseInterruptsStuckTransportRead(t *testing.T) {
 	}
 }
 func (transport *fakeSessionTransport) Close() error {
+	call := int(transport.closeCalls.Add(1))
+	if call <= len(transport.closeErrors) && transport.closeErrors[call-1] != nil {
+		return transport.closeErrors[call-1]
+	}
 	transport.once.Do(func() { close(transport.closed) })
 	return nil
+}
+
+func newSessionRelayForCloseTest(transport datagramTransport) *sessionRelay {
+	return newSessionRelay(
+		transport,
+		legacyTestSuite(),
+		ikeKeys{
+			SKai: bytes.Repeat([]byte{0x11}, 20),
+			SKar: bytes.Repeat([]byte{0x12}, 20),
+			SKei: bytes.Repeat([]byte{0x13}, 16),
+			SKer: bytes.Repeat([]byte{0x14}, 16),
+		},
+		[8]byte{1},
+		[8]byte{2},
+		9,
+		true,
+		time.Hour,
+	)
+}
+
+func TestSessionCloseConsumesRelayAfterDeleteFailure(t *testing.T) {
+	deleteErr := errors.New("test: IKE DELETE send failed")
+	transport := newFakeSessionTransport()
+	transport.sendErr = deleteErr
+	relay := newSessionRelayForCloseTest(transport)
+	session := &Session{relay: relay, transport: transport}
+
+	if err := session.Close(context.Background()); !errors.Is(err, deleteErr) {
+		t.Fatalf("first Close() error = %v, want %v", err, deleteErr)
+	}
+	if session.relay != nil || session.transport != nil {
+		t.Fatalf("consumed owners retained after DELETE failure: relay=%p transport=%T", session.relay, session.transport)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if sends, closes := transport.sendCalls.Load(), transport.closeCalls.Load(); sends != 1 || closes != 1 {
+		t.Fatalf("closed relay/transport reused: sends=%d closes=%d, want 1/1", sends, closes)
+	}
+}
+
+func TestSessionCloseRetriesOnlyTransportAfterRelayLocalCloseFailure(t *testing.T) {
+	closeErr := errors.New("test: transport close failed")
+	transport := newFakeSessionTransport()
+	transport.closeErrors = []error{closeErr, nil}
+	relay := newSessionRelayForCloseTest(transport)
+	session := &Session{relay: relay, transport: transport}
+
+	if err := session.Close(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("first Close() error = %v, want %v", err, closeErr)
+	}
+	if session.relay != nil || session.transport != transport {
+		t.Fatalf("first Close() owner state: relay=%p transport=%T", session.relay, session.transport)
+	}
+	if sends, closes := transport.sendCalls.Load(), transport.closeCalls.Load(); sends != 1 || closes != 1 {
+		t.Fatalf("first Close() calls = sends:%d closes:%d, want 1/1", sends, closes)
+	}
+
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if session.relay != nil || session.transport != nil {
+		t.Fatalf("retry did not release owners: relay=%p transport=%T", session.relay, session.transport)
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatalf("third Close() error = %v", err)
+	}
+	if sends, closes := transport.sendCalls.Load(), transport.closeCalls.Load(); sends != 1 || closes != 2 {
+		t.Fatalf("retry reused relay or over-closed transport: sends=%d closes=%d, want 1/2", sends, closes)
+	}
 }
 
 func TestSessionRelayDemuxesESPAndAnswersEncryptedDPD(t *testing.T) {

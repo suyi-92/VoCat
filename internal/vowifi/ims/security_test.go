@@ -1,6 +1,7 @@
 package ims
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"reflect"
@@ -239,6 +240,26 @@ func TestNewSecurityProposalUsesAndroidDefaultsForEveryCarrier(t *testing.T) {
 	if got := len(splitHeaderValues([]string{proposal.headerValue()})); got != 6 {
 		t.Fatalf("Security-Client mechanism count = %d, want 6", got)
 	}
+	if proposal.spiClient < 256 || proposal.spiServer < 256 ||
+		proposal.spiClient&1 != 0 || proposal.spiServer&1 != 0 ||
+		proposal.spiClient == proposal.spiServer {
+		t.Fatalf("UE inbound SPIs = %d/%d, want unique non-reserved even values", proposal.spiClient, proposal.spiServer)
+	}
+}
+
+func TestRandomSPIRejectsReservedAndExcludedValuesAfterMakingEven(t *testing.T) {
+	random := bytes.NewReader([]byte{
+		0x00, 0x00, 0x00, 0xff, // 255 becomes reserved 254.
+		0x00, 0x00, 0x01, 0x01, // 257 becomes the excluded 256.
+		0x00, 0x00, 0x01, 0x03, // 259 becomes valid 258.
+	})
+	spi, err := randomSPIFrom(random, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spi != 258 {
+		t.Fatalf("SPI = %d, want 258", spi)
+	}
 }
 
 func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
@@ -367,8 +388,8 @@ func testIPSecSAConfig() IPSecSAConfig {
 	return IPSecSAConfig{
 		LocalIP:         net.ParseIP("10.0.0.2"),
 		RemoteIP:        net.ParseIP("10.0.0.3"),
-		UEClientSPI:     0x10000001,
-		UEServerSPI:     0x10000002,
+		UEClientSPI:     0x10000002,
+		UEServerSPI:     0x10000004,
 		PCSCFClientSPI:  0x20000001,
 		PCSCFServerSPI:  0x20000002,
 		UEClientPort:    40666,

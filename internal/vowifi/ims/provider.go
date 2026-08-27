@@ -24,6 +24,9 @@ const (
 	defaultTransactionTimeout   = 12 * time.Second
 	maxAuthenticationChallenges = 3
 	defaultPANIWLANNode         = "ffffffffffff"
+	abandonedIPSecCloseAttempts = 3
+	abandonedIPSecCloseTimeout  = 2 * time.Second
+	abandonedIPSecRetryDelay    = 25 * time.Millisecond
 )
 
 var (
@@ -324,9 +327,9 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 				return session, nil
 			}
 			sipResponseObserved := session.evidence.LastSIPCode != 0
-			session.abort()
-			lastErr = establishErr
-			if sipResponseObserved || attempt+1 >= len(transports) || ctx.Err() != nil {
+			abortErr := session.abort()
+			lastErr = errors.Join(establishErr, abortErr)
+			if abortErr != nil || sipResponseObserved || attempt+1 >= len(transports) || ctx.Err() != nil {
 				break
 			}
 			provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
@@ -618,6 +621,7 @@ type Session struct {
 	nextRPReference    byte
 	callMu             sync.Mutex
 	calls              map[string]*imsCall
+	closeMu            sync.Mutex
 
 	mu                  sync.Mutex
 	closed              bool
@@ -745,19 +749,62 @@ func securityEncryptionForIdentity(identity vowifi.SIMIdentity) string {
 	return vowifi.ResolveCarrierProfile(identity).IMSIPSecEncryption
 }
 
-func (session *Session) abort() {
+func (session *Session) abort() error {
+	var cleanupErrors []error
 	session.refreshCancel()
-	_ = session.conn.Close()
+	if err := session.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		cleanupErrors = append(cleanupErrors, err)
+	}
 	if session.protectedTCP != nil {
-		_ = session.protectedTCP.Close()
+		if err := session.protectedTCP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			cleanupErrors = append(cleanupErrors, err)
+		}
 	}
 	if session.protectedUDP != nil {
-		_ = session.protectedUDP.Close()
+		if err := session.protectedUDP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			cleanupErrors = append(cleanupErrors, err)
+		}
 	}
 	if session.ipsecHandle != nil {
-		_ = session.ipsecHandle.Close(context.Background())
+		if err := closeAbandonedIPSecHandle(session.ipsecHandle); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("ims: abort IPsec cleanup: %w", err))
+		} else {
+			session.ipsecHandle = nil
+		}
 	}
 	session.clearAuthentication()
+	return errors.Join(cleanupErrors...)
+}
+
+// closeAbandonedIPSecHandle is used only when an error path cannot return the
+// handle to a caller for a later Close. Give transient local teardown failures
+// a few independent, bounded attempts without inheriting an expired SIP
+// operation context. Platform handles must retain unfinished work until Close
+// observes success or a confirmed already-absent object.
+func closeAbandonedIPSecHandle(handle IPSecSAHandle) error {
+	if handle == nil {
+		return nil
+	}
+	var lastErr error
+	for attempt := 1; attempt <= abandonedIPSecCloseAttempts; attempt++ {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			abandonedIPSecCloseTimeout,
+		)
+		lastErr = handle.Close(cleanupContext)
+		cleanupCancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < abandonedIPSecCloseAttempts {
+			time.Sleep(abandonedIPSecRetryDelay)
+		}
+	}
+	return fmt.Errorf(
+		"IPsec cleanup did not complete after %d bounded attempts: %w",
+		abandonedIPSecCloseAttempts,
+		lastErr,
+	)
 }
 
 func (session *Session) establish(ctx context.Context) error {
@@ -1605,6 +1652,11 @@ func (session *Session) smsCapabilityReady() bool {
 }
 
 func (session *Session) Close(ctx context.Context) error {
+	if session == nil {
+		return nil
+	}
+	session.closeMu.Lock()
+	defer session.closeMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1617,12 +1669,9 @@ func (session *Session) Close(ctx context.Context) error {
 	}
 
 	session.mu.Lock()
-	if session.closed {
-		session.mu.Unlock()
-		return nil
-	}
+	firstClose := !session.closed
 	var unregisterErr error
-	if session.evidence.Registered && ctx.Err() == nil {
+	if firstClose && session.evidence.Registered && ctx.Err() == nil {
 		response, err := session.register(ctx, 0)
 		if err != nil {
 			unregisterErr = err
@@ -1630,41 +1679,50 @@ func (session *Session) Close(ctx context.Context) error {
 			unregisterErr = fmt.Errorf("ims: SIP deregistration returned %d", response.StatusCode)
 		}
 	}
-	session.closed = true
-	session.evidence.Registered = false
-	session.evidence.RegistrationState = "closed"
-	session.smsContactConfirmed = false
-	session.clearAuthentication()
+	if firstClose {
+		session.closed = true
+		session.evidence.Registered = false
+		session.evidence.RegistrationState = "closed"
+		session.smsContactConfirmed = false
+		session.clearAuthentication()
+	}
 	session.mu.Unlock()
+	var cleanupErrors []error
+	// Media endpoints retain route references whose release failed. Invoke
+	// their idempotent Close on every session Close attempt so transient route
+	// cleanup failures remain recoverable through the real owner chain.
 	session.callMu.Lock()
-	for _, call := range session.calls {
+	for callID, call := range session.calls {
 		if call.media != nil {
-			_ = call.media.Close()
+			if err := call.media.Close(); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("ims: close media for call %s: %w", callID, err))
+			}
 		}
 	}
 	session.callMu.Unlock()
-	var cleanupErrors []error
-	if unregisterErr != nil {
-		cleanupErrors = append(cleanupErrors, unregisterErr)
-	}
-	// Runtime receive loops block in Read/Accept. Close every socket before
-	// waiting for those goroutines; waiting first deadlocks VoWiFi shutdown and
-	// leaves the modem permanently in CFUN=4.
-	if err := session.conn.Close(); err != nil {
-		cleanupErrors = append(cleanupErrors, err)
-	}
-	if session.protectedTCP != nil {
-		if err := session.protectedTCP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+	if firstClose {
+		if unregisterErr != nil {
+			cleanupErrors = append(cleanupErrors, unregisterErr)
+		}
+		// Runtime receive loops block in Read/Accept. Close every socket before
+		// waiting for those goroutines; waiting first deadlocks VoWiFi shutdown
+		// and leaves the modem permanently in CFUN=4.
+		if err := session.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			cleanupErrors = append(cleanupErrors, err)
 		}
-	}
-	if session.protectedUDP != nil {
-		if err := session.protectedUDP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			cleanupErrors = append(cleanupErrors, err)
+		if session.protectedTCP != nil {
+			if err := session.protectedTCP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				cleanupErrors = append(cleanupErrors, err)
+			}
 		}
+		if session.protectedUDP != nil {
+			if err := session.protectedUDP.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				cleanupErrors = append(cleanupErrors, err)
+			}
+		}
+		session.closeInboundConnections()
+		session.receiveDone.Wait()
 	}
-	session.closeInboundConnections()
-	session.receiveDone.Wait()
 	if session.ipsecHandle != nil {
 		// XFRM teardown is local and must still run when SIP deregistration has
 		// consumed the caller's deadline. Use a fresh bounded context so a
@@ -1675,6 +1733,8 @@ func (session *Session) Close(ctx context.Context) error {
 		cleanupCancel()
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, err)
+		} else {
+			session.ipsecHandle = nil
 		}
 	}
 	return errors.Join(cleanupErrors...)

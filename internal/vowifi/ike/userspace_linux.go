@@ -18,7 +18,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const userspaceTunnelPollInterval = 100 * time.Millisecond
+const (
+	userspaceTunnelPollInterval          = 100 * time.Millisecond
+	linuxUserspaceRollbackAttempts       = 3
+	linuxUserspaceRollbackAttemptTimeout = 2 * time.Second
+	linuxUserspaceRollbackRetryDelay     = 25 * time.Millisecond
+)
 
 type linuxUserspaceInstaller struct {
 	ipCommand string
@@ -37,12 +42,15 @@ type linuxUserspaceHandle struct {
 	wait       sync.WaitGroup
 	cancelOnce sync.Once
 	closeOnce  sync.Once
+	closeMu    sync.Mutex
 
-	mu          sync.Mutex
-	closed      bool
-	terminalErr error
-	failures    chan error
-	cleanup     []ipCleanupCommand
+	mu             sync.Mutex
+	closed         bool
+	networkCleaned bool
+	terminalErr    error
+	failures       chan error
+	cleanup        []ipCleanupCommand
+	dynamicRoutes  map[string]ipCleanupCommand
 }
 
 type ipCleanupCommand struct {
@@ -89,21 +97,19 @@ func (installer linuxUserspaceInstaller) Install(
 	config.Name = actualName
 	runContext, cancel := context.WithCancel(context.Background())
 	handle := &linuxUserspaceHandle{
-		ipCommand:  command,
-		config:     cloneChildSAConfig(config),
-		tunnel:     tunnel,
-		tun:        tun,
-		tunFD:      int(tun.Fd()),
-		relay:      config.Relay,
-		runContext: runContext,
-		cancel:     cancel,
-		failures:   make(chan error, 1),
+		ipCommand:     command,
+		config:        cloneChildSAConfig(config),
+		tunnel:        tunnel,
+		tun:           tun,
+		tunFD:         int(tun.Fd()),
+		relay:         config.Relay,
+		runContext:    runContext,
+		cancel:        cancel,
+		failures:      make(chan error, 1),
+		dynamicRoutes: make(map[string]ipCleanupCommand),
 	}
 	if err := handle.configure(ctx); err != nil {
-		cancel()
-		handle.cleanupNetwork(context.Background())
-		_ = tun.Close()
-		return nil, err
+		return nil, errors.Join(err, handle.rollbackInstall())
 	}
 	handle.wait.Add(2)
 	go handle.copyTUNToRelay()
@@ -225,9 +231,6 @@ func (handle *linuxUserspaceHandle) configureFamily(
 	table uint32,
 	priority uint32,
 ) error {
-	if len(pcscf) == 0 {
-		return nil
-	}
 	tableValue := strconv.FormatUint(uint64(table), 10)
 	priorityValue := strconv.FormatUint(uint64(priority), 10)
 	localPrefix := fmt.Sprintf("%s/%d", local.String(), bits)
@@ -293,6 +296,108 @@ func (handle *linuxUserspaceHandle) configureFamily(
 		)
 	}
 	return nil
+}
+
+func (handle *linuxUserspaceHandle) AddRoute(ctx context.Context, destination net.IP) error {
+	destination, family, local, bits, err := handle.dynamicRoutePlan(destination)
+	if err != nil {
+		return err
+	}
+	if isConfiguredPCSCF(handle.config, destination) {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key := destination.String()
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if handle.closed {
+		return errors.New("ike: user-space CHILD_SA is closed")
+	}
+	if _, exists := handle.dynamicRoutes[key]; exists {
+		return nil
+	}
+	table, _ := userspaceRoutingIdentifiers(handle.config.InboundSPI)
+	tableValue := strconv.FormatUint(uint64(table), 10)
+	hostPrefix := fmt.Sprintf("%s/%d", destination.String(), bits)
+	if err := handle.run(
+		ctx,
+		"install dynamic media host route",
+		family, "route", "add",
+		"table", tableValue,
+		hostPrefix,
+		"dev", handle.config.Name,
+		"src", local.String(),
+	); err != nil {
+		return err
+	}
+	handle.dynamicRoutes[key] = ipCleanupCommand{
+		operation: "remove dynamic media host route",
+		arguments: []string{
+			family, "route", "delete",
+			"table", tableValue,
+			hostPrefix,
+			"dev", handle.config.Name,
+			"src", local.String(),
+		},
+	}
+	return nil
+}
+
+func (handle *linuxUserspaceHandle) RemoveRoute(ctx context.Context, destination net.IP) error {
+	destination = canonicalRouteIP(destination)
+	if destination == nil {
+		return errors.New("ike: dynamic media route destination is invalid")
+	}
+	if isConfiguredPCSCF(handle.config, destination) {
+		return nil
+	}
+	key := destination.String()
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if handle.closed {
+		return nil
+	}
+	cleanup, exists := handle.dynamicRoutes[key]
+	if !exists {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := handle.runDelete(ctx, cleanup); err != nil {
+		return err
+	}
+	delete(handle.dynamicRoutes, key)
+	return nil
+}
+
+func (handle *linuxUserspaceHandle) dynamicRoutePlan(
+	destination net.IP,
+) (net.IP, string, net.IP, int, error) {
+	destination = canonicalRouteIP(destination)
+	if destination == nil || destination.IsUnspecified() || destination.IsMulticast() {
+		return nil, "", nil, 0, errors.New("ike: dynamic media route destination is invalid")
+	}
+	if destination.To4() != nil {
+		local := canonicalRouteIP(handle.config.InnerLocalIPv4)
+		if local == nil {
+			return nil, "", nil, 0, errors.New("ike: no assigned inner IPv4 address for media route")
+		}
+		return destination, "-4", local, 32, nil
+	}
+	local := canonicalRouteIP(handle.config.InnerLocalIPv6)
+	if local == nil {
+		return nil, "", nil, 0, errors.New("ike: no assigned inner IPv6 address for media route")
+	}
+	return destination, "-6", local, 128, nil
 }
 
 func userspaceRoutingIdentifiers(spi uint32) (table uint32, priority uint32) {
@@ -586,19 +691,25 @@ func (handle *linuxUserspaceHandle) Failures() <-chan error {
 
 func (handle *linuxUserspaceHandle) cancelRun() {
 	handle.cancelOnce.Do(func() {
-		handle.cancel()
+		if handle.cancel != nil {
+			handle.cancel()
+		}
 	})
 }
 
 func (handle *linuxUserspaceHandle) closeTUN() {
 	handle.closeOnce.Do(func() {
-		_ = handle.tun.Close()
+		if handle.tun != nil {
+			_ = handle.tun.Close()
+		}
 	})
 }
 
 func (handle *linuxUserspaceHandle) Close(ctx context.Context) error {
+	handle.closeMu.Lock()
+	defer handle.closeMu.Unlock()
 	handle.mu.Lock()
-	if handle.closed {
+	if handle.networkCleaned {
 		handle.mu.Unlock()
 		return nil
 	}
@@ -610,12 +721,47 @@ func (handle *linuxUserspaceHandle) Close(ctx context.Context) error {
 	// cancellation without requiring a cross-goroutine close. Wait first so no
 	// blocked syscall can retain the interface after Close returns.
 	handle.wait.Wait()
-	cleanupErr := handle.cleanupNetwork(ctx)
+	// Closing the persistent TUN first removes its inner addresses. Keep the
+	// fail-closed source rules in place until that has happened, then remove
+	// routes and rules in their recorded reverse order.
 	handle.closeTUN()
+	cleanupErr := handle.cleanupNetwork(ctx)
+	if cleanupErr == nil {
+		handle.mu.Lock()
+		handle.networkCleaned = true
+		handle.mu.Unlock()
+	}
 	// A terminal data-plane error is delivered exactly once through Failures.
 	// Close reports only teardown errors so the orchestrator does not record
 	// the same runtime cause again as a cleanup failure.
 	return cleanupErr
+}
+
+// rollbackInstall is used before Install can return a handle to its caller.
+// Reuse Close's resumable cleanup state for a few independent, bounded
+// attempts so one transient iproute2 failure does not strand source rules or
+// an unreachable routing table while still guaranteeing that Install returns.
+func (handle *linuxUserspaceHandle) rollbackInstall() error {
+	var lastErr error
+	for attempt := 1; attempt <= linuxUserspaceRollbackAttempts; attempt++ {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			linuxUserspaceRollbackAttemptTimeout,
+		)
+		lastErr = handle.Close(cleanupContext)
+		cleanupCancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < linuxUserspaceRollbackAttempts {
+			time.Sleep(linuxUserspaceRollbackRetryDelay)
+		}
+	}
+	return fmt.Errorf(
+		"ike: user-space CHILD_SA rollback did not complete after %d bounded attempts: %w",
+		linuxUserspaceRollbackAttempts,
+		lastErr,
+	)
 }
 
 func (handle *linuxUserspaceHandle) cleanupNetwork(ctx context.Context) error {
@@ -624,23 +770,42 @@ func (handle *linuxUserspaceHandle) cleanupNetwork(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	var errs []error
-	for index := len(handle.cleanup) - 1; index >= 0; index-- {
-		item := handle.cleanup[index]
-		command := exec.CommandContext(ctx, handle.ipCommand, item.arguments...)
-		if output, err := command.CombinedOutput(); err != nil {
-			message := strings.TrimSpace(string(output))
-			if message == "" {
-				message = err.Error()
-			}
-			errs = append(errs, fmt.Errorf("ike: %s: %s", item.operation, message))
+	for key, item := range handle.dynamicRoutes {
+		if err := handle.runDelete(ctx, item); err != nil {
+			return err
 		}
+		delete(handle.dynamicRoutes, key)
 	}
-	handle.cleanup = nil
-	return errors.Join(errs...)
+	for len(handle.cleanup) > 0 {
+		index := len(handle.cleanup) - 1
+		item := handle.cleanup[index]
+		if err := handle.runDelete(ctx, item); err != nil {
+			// The source rule was recorded before its unreachable default and
+			// allowed host routes. Stop at the first reverse-order failure so the
+			// fail-closed prerequisite remains installed for a later retry.
+			return err
+		}
+		handle.cleanup = handle.cleanup[:index]
+	}
+	return nil
+}
+
+func (handle *linuxUserspaceHandle) runDelete(ctx context.Context, item ipCleanupCommand) error {
+	command := exec.CommandContext(ctx, handle.ipCommand, item.arguments...)
+	command.Env = linuxIPCommandEnvironment()
+	output, err := command.CombinedOutput()
+	if err == nil || linuxIPDeleteReportsAbsent(output) {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("ike: %s: %s", item.operation, message)
 }
 
 var _ ChildSAInstaller = linuxUserspaceInstaller{}
 var _ ChildSAHandle = (*linuxUserspaceHandle)(nil)
 var _ DataplaneEvidence = (*linuxUserspaceHandle)(nil)
 var _ DataplaneFailureNotifier = (*linuxUserspaceHandle)(nil)
+var _ ChildSADynamicRouteManager = (*linuxUserspaceHandle)(nil)

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sort"
 	"strconv"
@@ -203,12 +204,19 @@ func (proposal securityProposal) supportsEncryption(encryption string) bool {
 }
 
 func randomSPI(exclude uint32) (uint32, error) {
+	return randomSPIFrom(rand.Reader, exclude)
+}
+
+func randomSPIFrom(random io.Reader, exclude uint32) (uint32, error) {
 	for attempts := 0; attempts < 16; attempts++ {
 		var value [4]byte
-		if _, err := rand.Read(value[:]); err != nil {
+		if _, err := io.ReadFull(random, value[:]); err != nil {
 			return 0, fmt.Errorf("ims: create protected SPI: %w", err)
 		}
-		spi := binary.BigEndian.Uint32(value[:])
+		// IPsecSaContextSetSpi0 rejects odd SPIs on Windows. Using the same
+		// even allocation on every platform remains valid ESP and keeps the
+		// Security-Client proposal independent of the eventual SA installer.
+		spi := binary.BigEndian.Uint32(value[:]) &^ uint32(1)
 		if spi >= 256 && spi != exclude {
 			return spi, nil
 		}
@@ -878,7 +886,7 @@ func (session *Session) activateIPSec(
 		remoteAddress,
 	)
 	if dialErr != nil {
-		cleanupErr := handle.Close(context.Background())
+		cleanupErr := closeAbandonedIPSecHandle(handle)
 		if cleanupErr != nil {
 			return errors.Join(
 				fmt.Errorf("ims: connect protected P-CSCF: %w", dialErr),

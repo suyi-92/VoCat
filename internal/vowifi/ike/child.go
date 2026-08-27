@@ -254,6 +254,7 @@ func parseConfiguration(item payload) (networkConfiguration, error) {
 
 type ChildSAConfig struct {
 	Name               string
+	DeviceID           string
 	OuterLocal         net.IP
 	OuterRemote        net.IP
 	InnerLocalIPv4     net.IP
@@ -294,6 +295,14 @@ type DataplaneEvidence interface {
 
 type DataplaneFailureNotifier interface {
 	Failures() <-chan error
+}
+
+// ChildSADynamicRouteManager installs destination routes needed after the
+// CHILD_SA is established. Policy validation and reference counting belong to
+// Session; platform handles only make each host-route operation idempotent.
+type ChildSADynamicRouteManager interface {
+	AddRoute(context.Context, net.IP) error
+	RemoveRoute(context.Context, net.IP) error
 }
 
 type ChildSAInstaller interface {

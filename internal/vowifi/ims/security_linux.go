@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -22,7 +23,7 @@ func defaultIPSecInstaller() IPSecSAInstaller {
 type linuxIPSecHandle struct {
 	mu        sync.Mutex
 	ipCommand string
-	config    IPSecSAConfig
+	cleanup   []xfrmOperation
 	closed    bool
 }
 
@@ -40,18 +41,36 @@ func (installer linuxIPSecInstaller) Install(ctx context.Context, config IPSecSA
 	}
 	handle := &linuxIPSecHandle{
 		ipCommand: command,
-		config:    cloneIPSecSAConfig(config),
 	}
-	for _, operation := range install {
+	cleanup := buildXFRMCleanupPlan(config)
+	if len(cleanup) != len(install) {
+		zeroBytes(config.EncryptionKey)
+		zeroBytes(config.IntegrityKey)
+		return nil, fmt.Errorf("%w: internal XFRM install/cleanup plan mismatch", ErrIPSecInstall)
+	}
+	for index, operation := range install {
 		if err := runIPCommand(ctx, command, operation); err != nil {
-			_ = handle.cleanup(context.Background())
-			zeroBytes(handle.config.EncryptionKey)
-			zeroBytes(handle.config.IntegrityKey)
-			return nil, fmt.Errorf("%w: %v", ErrIPSecInstall, err)
+			rollbackErr := closeAbandonedIPSecHandle(handle)
+			zeroBytes(config.EncryptionKey)
+			zeroBytes(config.IntegrityKey)
+			installErr := fmt.Errorf("%w: %v", ErrIPSecInstall, err)
+			if rollbackErr != nil {
+				return nil, errors.Join(
+					installErr,
+					fmt.Errorf("ims: roll back partial Linux XFRM install: %w", rollbackErr),
+				)
+			}
+			return nil, installErr
 		}
+		// The cleanup plan is the exact reverse of the install plan. Record
+		// only objects this handle successfully created so a partial-install
+		// rollback cannot delete a pre-existing object that caused a later add
+		// to fail.
+		cleanupOperation := cleanup[len(cleanup)-1-index]
+		handle.cleanup = append([]xfrmOperation{cleanupOperation}, handle.cleanup...)
 	}
-	zeroBytes(handle.config.EncryptionKey)
-	zeroBytes(handle.config.IntegrityKey)
+	zeroBytes(config.EncryptionKey)
+	zeroBytes(config.IntegrityKey)
 	return handle, nil
 }
 
@@ -61,18 +80,27 @@ func (handle *linuxIPSecHandle) Close(ctx context.Context) error {
 	if handle.closed {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := handle.cleanupPending(ctx); err != nil {
+		return err
+	}
 	handle.closed = true
-	return handle.cleanup(ctx)
+	return nil
 }
 
-func (handle *linuxIPSecHandle) cleanup(ctx context.Context) error {
-	var cleanupErrors []error
-	for _, operation := range buildXFRMCleanupPlan(handle.config) {
-		if err := runIPCommand(ctx, handle.ipCommand, operation); err != nil {
-			cleanupErrors = append(cleanupErrors, err)
+func (handle *linuxIPSecHandle) cleanupPending(ctx context.Context) error {
+	for len(handle.cleanup) > 0 {
+		operation := handle.cleanup[0]
+		if err := runIPCleanupCommand(ctx, handle.ipCommand, operation); err != nil {
+			// Stop at the first uncertain deletion. The operation remains owned by
+			// this handle, and a later Close resumes from the same point.
+			return err
 		}
+		handle.cleanup = handle.cleanup[1:]
 	}
-	return errors.Join(cleanupErrors...)
+	return nil
 }
 
 func runIPCommand(ctx context.Context, command string, operation xfrmOperation) error {
@@ -80,6 +108,20 @@ func runIPCommand(ctx context.Context, command string, operation xfrmOperation) 
 	if err == nil {
 		return nil
 	}
+	return formatIPCommandError(operation, output, err)
+}
+
+func runIPCleanupCommand(ctx context.Context, command string, operation xfrmOperation) error {
+	process := exec.CommandContext(ctx, command, operation.arguments...)
+	process.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	output, err := process.CombinedOutput()
+	if err == nil || linuxIPSecDeleteReportsAbsent(output) {
+		return nil
+	}
+	return formatIPCommandError(operation, output, err)
+}
+
+func formatIPCommandError(operation xfrmOperation, output []byte, err error) error {
 	message := strings.TrimSpace(string(output))
 	if message == "" {
 		message = err.Error()
@@ -94,4 +136,11 @@ func runIPCommand(ctx context.Context, command string, operation xfrmOperation) 
 	}
 	// Operation descriptions contain no SPI keys or subscriber identity.
 	return fmt.Errorf("%s: %s", operation.description, message)
+}
+
+func linuxIPSecDeleteReportsAbsent(output []byte) bool {
+	message := strings.ToLower(strings.TrimSpace(string(output)))
+	return strings.Contains(message, "no such file or directory") ||
+		strings.Contains(message, "no such process") ||
+		strings.Contains(message, "does not exist")
 }

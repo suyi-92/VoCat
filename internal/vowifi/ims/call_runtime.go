@@ -21,6 +21,11 @@ var (
 const terminalCallRetention = 30 * time.Second
 
 const (
+	abandonedMediaCloseAttempts = 3
+	abandonedMediaRetryDelay    = 25 * time.Millisecond
+)
+
+const (
 	mmtelServiceURN = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
 	mmtelFeatureTag = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
 )
@@ -44,19 +49,47 @@ type imsCall struct {
 	pracked        map[string]bool
 	sessionExpires int
 	sessionCancel  context.CancelFunc
+	cleanupOnly    bool
 }
 
 func (session *Session) Calls() []vowifi.Call {
+	type cleanupCandidate struct {
+		id    string
+		call  *imsCall
+		media *rtpMedia
+	}
+
 	session.callMu.Lock()
-	defer session.callMu.Unlock()
 	now := time.Now().UTC()
 	calls := make([]vowifi.Call, 0, len(session.calls))
+	cleanup := make([]cleanupCandidate, 0)
 	for id, call := range session.calls {
-		if call.public.EndedAt != nil && now.Sub(*call.public.EndedAt) > terminalCallRetention {
-			delete(session.calls, id)
+		if call.cleanupOnly ||
+			(call.public.EndedAt != nil && now.Sub(*call.public.EndedAt) > terminalCallRetention) {
+			cleanup = append(cleanup, cleanupCandidate{id: id, call: call, media: call.media})
 			continue
 		}
 		calls = append(calls, call.public)
+	}
+	session.callMu.Unlock()
+
+	// A failed RTP route release remains owned by the call until a later Close
+	// succeeds.  Expired calls are hidden from the public list while retained
+	// internally for cleanup, so retention cannot discard the final owner.
+	for _, candidate := range cleanup {
+		var err error
+		if candidate.media != nil {
+			err = candidate.media.Close()
+		}
+		if err != nil {
+			session.logCallMediaCleanupFailure(candidate.id, err)
+			continue
+		}
+		session.callMu.Lock()
+		if session.calls[candidate.id] == candidate.call {
+			delete(session.calls, candidate.id)
+		}
+		session.callMu.Unlock()
 	}
 	sort.Slice(calls, func(i, j int) bool { return calls[i].StartedAt.Before(calls[j].StartedAt) })
 	return calls
@@ -85,7 +118,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
 	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked(carrierProfile)
 	session.mu.Unlock()
-	media, err := newRTPMedia(session.localMediaIP())
+	media, err := newRTPMedia(session.localMediaIP(), session.mediaRouteManager())
 	if err != nil {
 		return vowifi.Call{}, err
 	}
@@ -133,8 +166,11 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	session.transactionsMu.Lock()
 	if _, duplicate := session.transactions[key]; duplicate {
 		session.transactionsMu.Unlock()
-		_ = media.Close()
-		return vowifi.Call{}, errors.New("ims: duplicate call transaction")
+		closeErr := media.Close()
+		return vowifi.Call{}, errors.Join(
+			errors.New("ims: duplicate call transaction"),
+			closeErr,
+		)
 	}
 	session.transactions[key] = responses
 	session.transactionsMu.Unlock()
@@ -159,14 +195,28 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	_, err = session.conn.Write(request)
 	session.writeMu.Unlock()
 	if err != nil {
-		_ = media.Close()
+		closeErr := closeAbandonedRTPMedia(media)
 		session.transactionsMu.Lock()
 		delete(session.transactions, key)
 		session.transactionsMu.Unlock()
 		session.callMu.Lock()
-		delete(session.calls, callID)
+		if closeErr == nil {
+			delete(session.calls, callID)
+		} else if failedCall := session.calls[callID]; failedCall == call {
+			// The API still reports the failed DialCall as an error, but the
+			// session must retain the media owner until Calls or Session.Close
+			// can release every route reference successfully.
+			now := time.Now().UTC()
+			failedCall.public.State = "failed"
+			failedCall.public.EndedAt = &now
+			failedCall.public.Reason = safeSIPDiagnostic(err.Error())
+			failedCall.cleanupOnly = true
+		}
 		session.callMu.Unlock()
-		return vowifi.Call{}, fmt.Errorf("ims: send SIP INVITE: %w", err)
+		return vowifi.Call{}, errors.Join(
+			fmt.Errorf("ims: send SIP INVITE: %w", err),
+			closeErr,
+		)
 	}
 	go session.watchOutgoingCall(call, key)
 	return call.public, nil
@@ -349,7 +399,7 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		if target == "" {
 			target = request.URI
 		}
-		media, err := newRTPMedia(session.localMediaIP())
+		media, err := newRTPMedia(session.localMediaIP(), session.mediaRouteManager())
 		if err != nil {
 			if response, buildErr := buildSIPResponseWithBody(request, 488, session.fromTag, nil); buildErr == nil {
 				_ = respond(response)
@@ -358,7 +408,15 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		}
 		if len(request.Body) > 0 {
 			if err := media.configureRemote(request.Body); err != nil {
-				_ = media.Close()
+				if closeErr := media.Close(); closeErr != nil &&
+					session.provider != nil && session.provider.config.Logger != nil {
+					session.provider.config.Logger.Warn("IMS media route cleanup failed",
+						"category", "call",
+						"device_id", session.request.DeviceID,
+						"call_id", callID,
+						"error", closeErr,
+					)
+				}
 				if response, buildErr := buildSIPResponseWithBody(request, 488, session.fromTag, nil); buildErr == nil {
 					_ = respond(response)
 				}
@@ -738,6 +796,17 @@ func (session *Session) localMediaIP() net.IP {
 	return addressIP(localAddress)
 }
 
+func (session *Session) mediaRouteManager() mediaRouteManager {
+	if session == nil || session.request.Tunnel == nil {
+		return nil
+	}
+	manager, _ := session.request.Tunnel.(mediaRouteManager)
+	if manager == nil && session.request.Tunnel.Evidence().DataplaneMode == "userspace" {
+		return unavailableMediaRouteManager{}
+	}
+	return manager
+}
+
 func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body []byte, extraHeaders ...string) ([]byte, error) {
 	reasons := map[int]string{180: "Ringing", 200: "OK", 486: "Busy Here", 487: "Request Terminated", 488: "Not Acceptable Here"}
 	reason := reasons[status]
@@ -940,8 +1009,42 @@ func (session *Session) finishCall(id, state string, code int, reason string) {
 	}
 	session.callMu.Unlock()
 	if media != nil {
-		_ = media.Close()
+		if err := media.Close(); err != nil {
+			session.logCallMediaCleanupFailure(id, err)
+		}
 	}
+}
+
+func closeAbandonedRTPMedia(media *rtpMedia) error {
+	if media == nil {
+		return nil
+	}
+	var err error
+	for attempt := 1; attempt <= abandonedMediaCloseAttempts; attempt++ {
+		if err = media.Close(); err == nil {
+			return nil
+		}
+		if attempt < abandonedMediaCloseAttempts {
+			time.Sleep(abandonedMediaRetryDelay)
+		}
+	}
+	return fmt.Errorf(
+		"ims: media cleanup still failed after %d attempts: %w",
+		abandonedMediaCloseAttempts,
+		err,
+	)
+}
+
+func (session *Session) logCallMediaCleanupFailure(callID string, err error) {
+	if err == nil || session.provider == nil || session.provider.config.Logger == nil {
+		return
+	}
+	session.provider.config.Logger.Warn("IMS media route cleanup failed",
+		"category", "call",
+		"device_id", session.request.DeviceID,
+		"call_id", callID,
+		"error", err,
+	)
 }
 
 func validCallNumber(value string) bool {

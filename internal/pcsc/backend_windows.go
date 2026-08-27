@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -75,6 +77,7 @@ type windowsSCardAPI struct {
 	getStatusChange   *windows.LazyProc
 	connect           *windows.LazyProc
 	beginTransaction  *windows.LazyProc
+	cancel            *windows.LazyProc
 	transmit          *windows.LazyProc
 	endTransaction    *windows.LazyProc
 	disconnect        *windows.LazyProc
@@ -91,6 +94,7 @@ func newWindowsSCardAPI() *windowsSCardAPI {
 		getStatusChange:  dll.NewProc("SCardGetStatusChangeW"),
 		connect:          dll.NewProc("SCardConnectW"),
 		beginTransaction: dll.NewProc("SCardBeginTransaction"),
+		cancel:           dll.NewProc("SCardCancel"),
 		transmit:         dll.NewProc("SCardTransmit"),
 		endTransaction:   dll.NewProc("SCardEndTransaction"),
 		disconnect:       dll.NewProc("SCardDisconnect"),
@@ -211,20 +215,53 @@ func (backend *windowsBackend) Open(ctx context.Context, selector Selector) (Car
 	}
 	var handle uintptr
 	var protocol uint32
-	status, _, _ := backend.api.connect.Call(
-		resource,
-		uintptr(unsafe.Pointer(readerName)),
-		windowsSCardShareShared,
-		windowsSCardProtocolAny,
-		uintptr(unsafe.Pointer(&handle)),
-		uintptr(unsafe.Pointer(&protocol)),
+	status, cancelErr := callWindowsSCardWithContext(
+		ctx,
+		func() uintptr {
+			status, _, _ := backend.api.connect.Call(
+				resource,
+				uintptr(unsafe.Pointer(readerName)),
+				windowsSCardShareShared,
+				windowsSCardProtocolAny,
+				uintptr(unsafe.Pointer(&handle)),
+				uintptr(unsafe.Pointer(&protocol)),
+			)
+			return status
+		},
+		func() {
+			backend.api.cancel.Call(resource)
+		},
 	)
 	runtime.KeepAlive(readerName)
+	if cancelErr != nil {
+		if handle != 0 {
+			backend.disconnectCard(handle, windowsSCardLeaveCard)
+		}
+		backend.releaseContext(resource)
+		return nil, cancelErr
+	}
 	if code := uint32(status); code != windowsSCardSuccess {
 		backend.releaseContext(resource)
 		return nil, newWindowsPCSCError("connect to "+reader.Name, code)
 	}
-	status, _, _ = backend.api.beginTransaction.Call(handle)
+	status, cancelErr = callWindowsSCardWithContext(
+		ctx,
+		func() uintptr {
+			status, _, _ := backend.api.beginTransaction.Call(handle)
+			return status
+		},
+		func() {
+			// Windows 11 does not consistently export the SDK-declared
+			// SCardCancelTransaction entry point. SCardCancel terminates the
+			// outstanding action through the context that owns this card.
+			backend.api.cancel.Call(resource)
+		},
+	)
+	if cancelErr != nil {
+		backend.disconnectCard(handle, windowsSCardLeaveCard)
+		backend.releaseContext(resource)
+		return nil, cancelErr
+	}
 	if code := uint32(status); code != windowsSCardSuccess {
 		backend.disconnectCard(handle, windowsSCardLeaveCard)
 		backend.releaseContext(resource)
@@ -243,7 +280,6 @@ func (backend *windowsBackend) Open(ctx context.Context, selector Selector) (Car
 		protocol: protocol,
 	}, nil
 }
-
 func (backend *windowsBackend) establishContext(operation string) (uintptr, error) {
 	var resource uintptr
 	status, _, _ := backend.api.establishContext.Call(
@@ -270,40 +306,57 @@ func (backend *windowsBackend) releaseContext(resource uintptr) error {
 }
 
 func (backend *windowsBackend) readerNames(resource uintptr) ([]string, error) {
-	var length uint32
-	status, _, _ := backend.api.listReaders.Call(
-		resource,
-		0,
-		0,
-		uintptr(unsafe.Pointer(&length)),
-	)
-	code := uint32(status)
-	if code == windowsSCardErrorNoReaders {
-		return []string{}, nil
+	return listWindowsReaderNames(func(buffer []uint16, length *uint32) uint32 {
+		var bufferPointer uintptr
+		if len(buffer) > 0 {
+			bufferPointer = uintptr(unsafe.Pointer(&buffer[0]))
+		}
+		status, _, _ := backend.api.listReaders.Call(
+			resource,
+			0,
+			bufferPointer,
+			uintptr(unsafe.Pointer(length)),
+		)
+		runtime.KeepAlive(buffer)
+		return uint32(status)
+	})
+}
+
+const windowsListReadersMaxCalls = 4
+
+type windowsListReadersCall func(buffer []uint16, length *uint32) uint32
+
+func listWindowsReaderNames(call windowsListReadersCall) ([]string, error) {
+	var buffer []uint16
+	for attempt := 0; attempt < windowsListReadersMaxCalls; attempt++ {
+		length := uint32(len(buffer))
+		code := call(buffer, &length)
+		if code == windowsSCardErrorNoReaders {
+			return []string{}, nil
+		}
+		if length > windowsMaxMultiStringCharacters {
+			return nil, errors.New("pcsc: Windows reader list is unreasonably large")
+		}
+		switch code {
+		case windowsSCardSuccess:
+			if length == 0 {
+				return []string{}, nil
+			}
+			if len(buffer) == 0 || length > uint32(len(buffer)) {
+				buffer = make([]uint16, length)
+				continue
+			}
+			return parseWindowsMultiString(buffer[:length]), nil
+		case windowsSCardErrorInsufficient:
+			if length == 0 {
+				return nil, errors.New("pcsc: Windows returned no required reader-list size")
+			}
+			buffer = make([]uint16, length)
+		default:
+			return nil, newWindowsPCSCError("list readers", code)
+		}
 	}
-	if code != windowsSCardSuccess {
-		return nil, newWindowsPCSCError("list readers", code)
-	}
-	if length == 0 {
-		return []string{}, nil
-	}
-	if length > windowsMaxMultiStringCharacters {
-		return nil, errors.New("pcsc: Windows reader list is unreasonably large")
-	}
-	buffer := make([]uint16, length)
-	status, _, _ = backend.api.listReaders.Call(
-		resource,
-		0,
-		uintptr(unsafe.Pointer(&buffer[0])),
-		uintptr(unsafe.Pointer(&length)),
-	)
-	if code = uint32(status); code != windowsSCardSuccess {
-		return nil, newWindowsPCSCError("list readers", code)
-	}
-	if int(length) < len(buffer) {
-		buffer = buffer[:length]
-	}
-	return parseWindowsMultiString(buffer), nil
+	return nil, errors.New("pcsc: Windows reader list changed too often while being enumerated")
 }
 
 func (backend *windowsBackend) readerDeviceInstanceID(resource uintptr, readerName *uint16) (string, bool) {
@@ -408,7 +461,7 @@ func (card *windowsCard) transmit(ctx context.Context, command []byte, depth int
 		}
 		return append(data, more...), sw, nil
 	}
-	return data, status, contextError(ctx)
+	return data, status, nil
 }
 
 func (card *windowsCard) transmitRaw(ctx context.Context, command []byte) ([]byte, uint16, error) {
@@ -424,25 +477,34 @@ func (card *windowsCard) transmitRaw(ctx context.Context, command []byte) ([]byt
 	request := windowsIORequest{protocol: card.protocol, length: uint32(unsafe.Sizeof(windowsIORequest{}))}
 	response := make([]byte, windowsMaxAPDUResponseBytes)
 	responseLength := uint32(len(response))
-	status, _, _ := card.api.transmit.Call(
-		card.handle,
-		uintptr(unsafe.Pointer(&request)),
-		uintptr(unsafe.Pointer(&command[0])),
-		uintptr(len(command)),
-		0,
-		uintptr(unsafe.Pointer(&response[0])),
-		uintptr(unsafe.Pointer(&responseLength)),
+	status, cancelErr := callWindowsSCardWithContext(
+		ctx,
+		func() uintptr {
+			status, _, _ := card.api.transmit.Call(
+				card.handle,
+				uintptr(unsafe.Pointer(&request)),
+				uintptr(unsafe.Pointer(&command[0])),
+				uintptr(len(command)),
+				0,
+				uintptr(unsafe.Pointer(&response[0])),
+				uintptr(unsafe.Pointer(&responseLength)),
+			)
+			return status
+		},
+		func() {
+			card.api.cancel.Call(card.resource)
+		},
 	)
 	runtime.KeepAlive(command)
 	runtime.KeepAlive(response)
+	if cancelErr != nil {
+		return nil, 0, cancelErr
+	}
 	if code := uint32(status); code != windowsSCardSuccess {
 		return nil, 0, newWindowsPCSCError("transmit APDU", code)
 	}
 	if responseLength > uint32(len(response)) {
 		return nil, 0, errors.New("pcsc: Windows returned an oversized APDU response")
-	}
-	if err := contextError(ctx); err != nil {
-		return nil, 0, err
 	}
 	return splitAPDUResponse(response[:responseLength])
 }
@@ -637,6 +699,75 @@ func windowsHardwareIDField(value, marker string) string {
 		}
 	}
 	return strings.ToLower(field)
+}
+
+const (
+	windowsSCardCallPending uint32 = iota
+	windowsSCardCallCompleted
+	windowsSCardCallCancelling
+
+	windowsSCardCancelRetryInterval = 10 * time.Millisecond
+)
+
+// callWindowsSCardWithContext runs one synchronous WinSCard call while a
+// separate goroutine cancels it if ctx expires. The atomic state gives either
+// the call completion or the cancellation watcher exclusive ownership of the
+// outcome: once a call completed successfully, a late context cancellation
+// cannot cancel the transaction that subsequent card work is about to use.
+//
+// Cancellation is retried at a bounded rate until the native call returns.
+// A fixed retry count is insufficient: the watcher can run immediately before
+// the target WinSCard call enters the resource manager, and the goroutine that
+// invokes the native call can be delayed for longer than any fixed window.
+func callWindowsSCardWithContext(
+	ctx context.Context,
+	call func() uintptr,
+	cancel func(),
+) (uintptr, error) {
+	if err := contextError(ctx); err != nil {
+		return 0, err
+	}
+	if ctx == nil || ctx.Done() == nil {
+		return call(), nil
+	}
+
+	var state atomic.Uint32
+	callDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-callDone:
+			return
+		case <-ctx.Done():
+			if !state.CompareAndSwap(windowsSCardCallPending, windowsSCardCallCancelling) {
+				return
+			}
+		}
+
+		ticker := time.NewTicker(windowsSCardCancelRetryInterval)
+		defer ticker.Stop()
+		for {
+			cancel()
+			select {
+			case <-callDone:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	status := call()
+	state.CompareAndSwap(windowsSCardCallPending, windowsSCardCallCompleted)
+	close(callDone)
+	<-watcherDone
+	if state.Load() == windowsSCardCallCancelling {
+		if err := contextError(ctx); err != nil {
+			return status, err
+		}
+		return status, context.Canceled
+	}
+	return status, nil
 }
 
 func contextError(ctx context.Context) error {

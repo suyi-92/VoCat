@@ -2,6 +2,7 @@ package ims
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -12,6 +13,131 @@ import (
 
 	"vocat/internal/vowifi"
 )
+
+type countedMediaRouteManager struct {
+	releaseErr      error
+	releaseFailures int
+	releases        int
+}
+
+func (*countedMediaRouteManager) AcquireMediaRoute(context.Context, net.IP, uint16, uint16) error {
+	return nil
+}
+
+func (manager *countedMediaRouteManager) ReleaseMediaRoute(context.Context, net.IP) error {
+	manager.releases++
+	if manager.releases <= manager.releaseFailures {
+		return manager.releaseErr
+	}
+	return nil
+}
+
+func TestCallsRetainsHiddenMediaOwnerUntilRouteCleanupSucceeds(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		cleanupOnly bool
+		endedAt     time.Time
+	}{
+		{
+			name:    "expired terminal call",
+			endedAt: time.Now().UTC().Add(-terminalCallRetention - time.Second),
+		},
+		{
+			name:        "unpublished failed call",
+			cleanupOnly: true,
+			endedAt:     time.Now().UTC(),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cleanupErr := errors.New("transient media route cleanup failure")
+			manager := &fakeMediaRouteManager{
+				releaseFailure: map[string]error{"127.0.0.2": cleanupErr},
+			}
+			media, err := newRTPMedia(net.IPv4(127, 0, 0, 1), manager)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := media.configureRemote([]byte(
+				"v=0\r\nc=IN IP4 127.0.0.2\r\nm=audio 4000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+			)); err != nil {
+				t.Fatal(err)
+			}
+			call := &imsCall{
+				public:      vowifi.Call{ID: "cleanup-call", State: "failed", EndedAt: &testCase.endedAt},
+				callID:      "cleanup-call",
+				media:       media,
+				cleanupOnly: testCase.cleanupOnly,
+			}
+			session := &Session{calls: map[string]*imsCall{call.callID: call}}
+
+			if calls := session.Calls(); len(calls) != 0 {
+				t.Fatalf("hidden terminal calls = %#v, want none", calls)
+			}
+			session.callMu.Lock()
+			retained := session.calls[call.callID] == call
+			session.callMu.Unlock()
+			if !retained {
+				t.Fatal("failed media cleanup discarded the final call owner")
+			}
+
+			manager.mu.Lock()
+			delete(manager.releaseFailure, "127.0.0.2")
+			manager.mu.Unlock()
+			if calls := session.Calls(); len(calls) != 0 {
+				t.Fatalf("cleaned terminal calls = %#v, want none", calls)
+			}
+			session.callMu.Lock()
+			_, retained = session.calls[call.callID]
+			session.callMu.Unlock()
+			if retained {
+				t.Fatal("call remained retained after media cleanup succeeded")
+			}
+		})
+	}
+}
+
+func TestCloseAbandonedRTPMediaUsesStrictBoundedRetries(t *testing.T) {
+	cleanupErr := errors.New("media route cleanup failed")
+	for _, testCase := range []struct {
+		name            string
+		failures        int
+		wantErr         bool
+		wantReleaseCall int
+	}{
+		{name: "transient", failures: 1, wantReleaseCall: 2},
+		{name: "persistent", failures: abandonedMediaCloseAttempts + 1, wantErr: true, wantReleaseCall: abandonedMediaCloseAttempts},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			manager := &countedMediaRouteManager{
+				releaseErr:      cleanupErr,
+				releaseFailures: testCase.failures,
+			}
+			media, err := newRTPMedia(net.IPv4(127, 0, 0, 1), manager)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := media.configureRemote([]byte(
+				"v=0\r\nc=IN IP4 127.0.0.2\r\nm=audio 4000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n",
+			)); err != nil {
+				t.Fatal(err)
+			}
+
+			err = closeAbandonedRTPMedia(media)
+			if testCase.wantErr != (err != nil) || err != nil && !errors.Is(err, cleanupErr) {
+				t.Fatalf("closeAbandonedRTPMedia() error = %v, wantErr=%v", err, testCase.wantErr)
+			}
+			if manager.releases != testCase.wantReleaseCall {
+				t.Fatalf("release calls = %d, want %d", manager.releases, testCase.wantReleaseCall)
+			}
+
+			// Do not leak the persistent test's retained owner.
+			manager.releaseFailures = manager.releases
+			if err := media.Close(); err != nil {
+				t.Fatalf("final media cleanup: %v", err)
+			}
+		})
+	}
+}
 
 func TestIncomingCallCanRingAndAnswerWithMediaOffer(t *testing.T) {
 	client, peer := net.Pipe()

@@ -3,14 +3,12 @@
 package main
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"runtime"
 	"unsafe"
+
+	"vocat/internal/wintunsecure"
 
 	"golang.org/x/sys/windows"
 )
@@ -125,97 +123,83 @@ func windowsServiceState(state uint32) string {
 }
 
 func windowsWintunCheck() doctorCheck {
-	executable, executableErr := os.Executable()
-	systemDirectory, systemErr := windows.GetSystemDirectory()
-	var candidates []string
-	if executableErr == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(executable), "wintun.dll"))
-	}
-	if systemErr == nil {
-		candidates = append(candidates, filepath.Join(systemDirectory, "wintun.dll"))
-	}
-	var path string
-	for _, candidate := range candidates {
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() {
-			path = candidate
-			break
-		}
-	}
-	if path == "" {
+	path, candidates, err := wintunsecure.FindDLL()
+	if errors.Is(err, os.ErrNotExist) {
 		return doctorCheck{
 			Name:    "wintun",
 			Status:  "warning",
 			Code:    "wintun_dll_missing",
-			Message: "Official architecture-matched wintun.dll was not found beside vocat.exe or in System32; eSIM remains available, but VoWiFi cannot start",
+			Message: "A trusted architecture-matched wintun.dll was not found beside vocat.exe or in System32; eSIM remains available, but VoWiFi cannot start",
 			Evidence: map[string]any{
 				"searched": candidates,
 			},
 		}
 	}
-	machine, err := readPEMachine(path)
 	if err != nil {
 		return doctorCheck{
 			Name: "wintun", Status: "failed", Code: "wintun_dll_invalid",
-			Message:  fmt.Sprintf("Cannot validate wintun.dll PE header: %v", err),
-			Evidence: map[string]any{"path": path},
+			Message:  fmt.Sprintf("Cannot select wintun.dll safely: %v", err),
+			Evidence: map[string]any{"searched": candidates},
 		}
 	}
-	architecture := peMachineArchitecture(machine)
-	if architecture != runtime.GOARCH {
-		return doctorCheck{
-			Name: "wintun", Status: "failed", Code: "wintun_architecture_mismatch",
-			Message:  fmt.Sprintf("wintun.dll is %s but vocat.exe is %s", architecture, runtime.GOARCH),
-			Evidence: map[string]any{"path": path, "machine": fmt.Sprintf("0x%04X", machine)},
+	return windowsWintunDLLCheck(path)
+}
+
+func windowsWintunDLLCheck(path string) doctorCheck {
+	report, err := wintunsecure.Inspect(path)
+	evidence := map[string]any{
+		"path":         report.Path,
+		"machine":      fmt.Sprintf("0x%04X", report.Machine),
+		"architecture": report.Architecture,
+		"sha256":       report.SHA256,
+		"trust":        report.Trust,
+	}
+	if evidence["path"] == "" {
+		evidence["path"] = path
+	}
+	if err != nil {
+		var validationErr *wintunsecure.ValidationError
+		if !errors.As(err, &validationErr) {
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_dll_invalid",
+				Message: fmt.Sprintf("Cannot validate wintun.dll safely: %v", err), Evidence: evidence,
+			}
+		}
+		switch validationErr.Failure {
+		case wintunsecure.FailureArchitectureMismatch:
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_architecture_mismatch",
+				Message: fmt.Sprintf("wintun.dll architecture does not match vocat.exe: %v", err), Evidence: evidence,
+			}
+		case wintunsecure.FailureUntrusted:
+			evidence["authenticode"] = "untrusted"
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_dll_untrusted",
+				Message: fmt.Sprintf("wintun.dll does not have a trusted Authenticode signature: %v", err), Evidence: evidence,
+			}
+		case wintunsecure.FailureExportsUnreadable:
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_dll_exports_unreadable",
+				Message: fmt.Sprintf("Cannot inspect wintun.dll exports without executing it: %v", err), Evidence: evidence,
+			}
+		case wintunsecure.FailureExportsMissing:
+			evidence["missing_exports"] = validationErr.MissingExports
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_dll_exports_missing",
+				Message: fmt.Sprintf("wintun.dll is missing %d API export(s) required by VoCat", len(validationErr.MissingExports)), Evidence: evidence,
+			}
+		default:
+			return doctorCheck{
+				Name: "wintun", Status: "failed", Code: "wintun_dll_invalid",
+				Message: fmt.Sprintf("Cannot validate wintun.dll safely: %v", err), Evidence: evidence,
+			}
 		}
 	}
+	evidence["authenticode"] = "trusted"
+	evidence["exports"] = report.Exports
 	return doctorCheck{
 		Name: "wintun", Status: "passed", Code: "wintun_dll_ready",
-		Message:  "Architecture-matched wintun.dll is available from a safe DLL search location",
-		Evidence: map[string]any{"path": path, "architecture": architecture},
-	}
-}
-
-func readPEMachine(path string) (uint16, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-	return parsePEMachine(file)
-}
-
-func parsePEMachine(reader io.ReaderAt) (uint16, error) {
-	dosHeader := make([]byte, 64)
-	if _, err := reader.ReadAt(dosHeader, 0); err != nil {
-		return 0, fmt.Errorf("read DOS header: %w", err)
-	}
-	if string(dosHeader[:2]) != "MZ" {
-		return 0, errors.New("missing MZ signature")
-	}
-	peOffset := int64(binary.LittleEndian.Uint32(dosHeader[0x3c:0x40]))
-	if peOffset < 64 || peOffset > 64<<20 {
-		return 0, errors.New("invalid PE header offset")
-	}
-	peHeader := make([]byte, 6)
-	if _, err := reader.ReadAt(peHeader, peOffset); err != nil {
-		return 0, fmt.Errorf("read PE header: %w", err)
-	}
-	if string(peHeader[:4]) != "PE\x00\x00" {
-		return 0, errors.New("missing PE signature")
-	}
-	return binary.LittleEndian.Uint16(peHeader[4:6]), nil
-}
-
-func peMachineArchitecture(machine uint16) string {
-	switch machine {
-	case 0x8664:
-		return "amd64"
-	case 0xaa64:
-		return "arm64"
-	case 0x014c:
-		return "386"
-	default:
-		return fmt.Sprintf("unknown-0x%04X", machine)
+		Message:  "Architecture-matched wintun.dll has a trusted Authenticode signature and all APIs required by VoCat",
+		Evidence: evidence,
 	}
 }

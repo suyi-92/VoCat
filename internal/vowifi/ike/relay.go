@@ -207,6 +207,15 @@ func (relay *sessionRelay) terminalError() error {
 }
 
 func (relay *sessionRelay) Close() error {
+	_, err := relay.closeLocal()
+	return err
+}
+
+// closeLocal permanently consumes the relay goroutine and reports separately
+// whether the underlying transport confirmed its close. The relay cannot be
+// retried after cancel/done, but a transport whose Close failed can still be
+// retained by its owner and closed directly on a later attempt.
+func (relay *sessionRelay) closeLocal() (bool, error) {
 	relay.cancel()
 	// ReceiveSessionPacket implementations normally observe the canceled
 	// context through a short read deadline. Close the transport as an explicit
@@ -214,12 +223,17 @@ func (relay *sessionRelay) Close() error {
 	// hold teardown (and the associated TUN interface) indefinitely.
 	transportErr := relay.transport.Close()
 	<-relay.done
-	return errors.Join(relay.terminalErrorIfFailure(), transportErr)
+	return transportErr == nil, errors.Join(relay.terminalErrorIfFailure(), transportErr)
 }
 
-func (relay *sessionRelay) CloseWithDelete(ctx context.Context) error {
+// CloseWithDelete returns whether the underlying transport confirmed its
+// close. Regardless of that result, the relay itself has been canceled and
+// joined and must not be called again. A protocol-level DELETE failure is
+// reported without disguising the independently observed local close state.
+func (relay *sessionRelay) CloseWithDelete(ctx context.Context) (bool, error) {
 	deleteErr := relay.sendIKEDelete(ctx)
-	return errors.Join(deleteErr, relay.Close())
+	transportClosed, closeErr := relay.closeLocal()
+	return transportClosed, errors.Join(deleteErr, closeErr)
 }
 
 func (relay *sessionRelay) sendIKEDelete(ctx context.Context) error {

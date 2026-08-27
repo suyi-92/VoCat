@@ -201,6 +201,20 @@ func buildWindowsIPSecPlan(config IPSecSAConfig) ([]windowsIPSecPairPlan, error)
 	if err := validateIPSecSAConfig(config); err != nil {
 		return nil, err
 	}
+	for _, inbound := range []struct {
+		name string
+		spi  uint32
+	}{
+		{name: "UE-client", spi: config.UEClientSPI},
+		{name: "UE-server", spi: config.UEServerSPI},
+	} {
+		if inbound.spi < 256 {
+			return nil, fmt.Errorf("ims: Windows WFP %s inbound SPI is reserved", inbound.name)
+		}
+		if inbound.spi&1 != 0 {
+			return nil, fmt.Errorf("ims: Windows WFP %s inbound SPI must be even", inbound.name)
+		}
+	}
 	flow := func(name string, inbound bool, localPort int, remotePort int) windowsIPSecFlowPlan {
 		return windowsIPSecFlowPlan{
 			name:       name,
@@ -463,10 +477,18 @@ func windowsIPSecAddress(ip net.IP) (uint32, [16]byte, error) {
 	if ipv6 == nil {
 		return 0, result, errors.New("ims: Windows WFP traffic address is invalid")
 	}
-	// The Windows SDK defines the IPv6 arm of IPSEC_TRAFFIC1's address union
-	// as UINT8[16], not as a host-order integer. Preserve the network-order
-	// byte sequence exactly. Only the IPv4 UINT32 arm needs host byte order.
-	copy(result[:], ipv6)
+	// Despite being exposed as a 16-byte union arm, WFP interprets an IPv6
+	// IPSEC_TRAFFIC1 address as four host-order UINT32 values ordered from the
+	// least-significant word to the most-significant word. Convert and reverse
+	// the four network-order words, matching the long-standing kernel-wfp ABI
+	// implementation in strongSwan.
+	for destinationOffset := 0; destinationOffset < len(result); destinationOffset += 4 {
+		sourceOffset := len(result) - 4 - destinationOffset
+		binary.LittleEndian.PutUint32(
+			result[destinationOffset:destinationOffset+4],
+			binary.BigEndian.Uint32(ipv6[sourceOffset:sourceOffset+4]),
+		)
+	}
 	return wfpIPVersionV6, result, nil
 }
 
@@ -731,45 +753,58 @@ func windowsIPSecInstallError(operation string, err error) error {
 
 func (handle *windowsIPSecHandle) rollback(operation string, cause error) error {
 	primary := windowsIPSecInstallError(operation, cause)
-	if cleanupErr := handle.Close(context.Background()); cleanupErr != nil {
+	if cleanupErr := closeAbandonedIPSecHandle(handle); cleanupErr != nil {
 		return errors.Join(primary, fmt.Errorf("ims: roll back Windows WFP IPsec: %w", cleanupErr))
 	}
 	return primary
 }
 
 func (handle *windowsIPSecHandle) Close(context.Context) error {
+	if handle == nil {
+		return nil
+	}
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	if handle.closed {
 		return nil
 	}
-	handle.closed = true
 	var cleanupErrors []error
 	for index := len(handle.contextIDs) - 1; index >= 0; index-- {
 		if err := handle.api.deleteSAContext(handle.engine, handle.contextIDs[index]); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
+			continue
 		}
+		handle.contextIDs = append(handle.contextIDs[:index], handle.contextIDs[index+1:]...)
 	}
-	handle.contextIDs = nil
 	for index := len(handle.filterIDs) - 1; index >= 0; index-- {
 		if err := handle.api.deleteFilter(handle.engine, handle.filterIDs[index]); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
+			continue
 		}
+		handle.filterIDs = append(handle.filterIDs[:index], handle.filterIDs[index+1:]...)
 	}
-	handle.filterIDs = nil
 	if handle.subLayerAdded {
 		if err := handle.api.deleteSubLayer(handle.engine, &handle.subLayerKey); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
+		} else {
+			handle.subLayerAdded = false
 		}
-		handle.subLayerAdded = false
 	}
 	if handle.engine != 0 {
 		if err := handle.api.closeEngine(handle.engine); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
+			return errors.Join(cleanupErrors...)
 		}
+		// This is a dynamic WFP session. Once its engine handle closes, WFP
+		// removes any objects whose explicit deletion reported a transient
+		// error, so the final observed state is clean.
 		handle.engine = 0
+		handle.contextIDs = nil
+		handle.filterIDs = nil
+		handle.subLayerAdded = false
 	}
-	return errors.Join(cleanupErrors...)
+	handle.closed = true
+	return nil
 }
 
 var _ IPSecSAInstaller = windowsIPSecInstaller{}
