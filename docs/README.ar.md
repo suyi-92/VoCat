@@ -48,7 +48,7 @@ Vocat هي لوحة تحكم ويب مفتوحة المصدر ومجموعة أ�
 | الإشعارات | إعادة توجيه الرسائل القصيرة الواردة الجديدة عبر Telegram وBark والبريد الإلكتروني وPushplus وwebhooks الموقّعة. يتم تسليم كل رسالة كإشعار منفصل. |
 | بوت Telegram | حالة الجهاز، قائمة الملفات الشخصية المثبتة وتبديلها، ضوابط WiFi Calling، وإرسال الرسائل القصيرة. تتطلب الإجراءات الحساسة تأكيد المسؤول. |
 | العمليات | المصادقة، الحماية من CSRF، سياسات الوصول، أحداث التدقيق، السجلات المباشرة، الاحتفاظ بالسجلات، فحوصات الصحة، تخطيط متجاوب، الوضع الداكن، وواجهة مستخدم بالإنجليزية/الصينية. |
-| التوزيع | ملفات Linux الثنائية الثابتة، سكربت تثبيت systemd، تحديث ذاتي مع التحقق من SHA-256، صورة Docker، النشر إلى GHCR، وبنى إصدارات GitHub Actions. |
+| التوزيع | أرشيفات منصات تضم ملفات Linux التنفيذية الثابتة وملفات Windows 11 الأصلية، وتحديث ذاتي مع التحقق من SHA-256، وتثبيت systemd، وصورة Docker، والنشر إلى GHCR، وبنى إصدارات GitHub Actions. |
 
 ## الأجهزة المدعومة
 
@@ -99,8 +99,8 @@ sudo bash install.sh 0.0.2
 المثبّت:
 
 - يكتشف `amd64` أو `386` أو `arm64` أو `aarch64` أو `armv7`؛
-- ينزّل الملف الثنائي المطابق من GitHub Release؛
-- يتحقق منه مقابل `SHA256SUMS`؛
+- ينزّل أرشيف المنصة المطابق من GitHub Release؛
+- يتحقق من الأرشيف مقابل `SHA256SUMS` ويفحص محتوياته قبل فكّه بأمان؛
 - يثبّت Vocat في `/opt/vocat`؛
 - ينشئ خدمة systemd محصّنة بوصول الأجهزة والشبكة الذي يتطلبه Vocat؛
 - يخزّن إعدادات وقت التشغيل في `/etc/vocat/env`؛
@@ -112,24 +112,30 @@ sudo bash install.sh 0.0.2
 http://<عنوان-الخادم>:7575
 ```
 
-### التثبيت اليدوي للملف الثنائي
+### التثبيت اليدوي من الأرشيف
 
-نزّل الملف الثنائي المطابق و`SHA256SUMS` من GitHub Releases:
+نزّل أرشيف المنصة المطابق و`SHA256SUMS` من GitHub Releases. يحتوي كل أرشيف على الملف التنفيذي و`LICENSE` و`NOTICE` والمجلد `LICENSES/`:
 
 | المنصة | ملف الإصدار |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32-بت | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32-بت | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 تحقق منه وثبّته:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -202,7 +208,7 @@ Quectel USB المدعومة (معرّف الشركة المصنعة USB `2c7c`)
 | `VOCAT_SECURE_COOKIES` | `false` | يضع علامة آمنة على ملفات تعريف ارتباط الجلسة عند استخدام HTTPS. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | مهلة الإيقاف السلس. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | الحد الأقصى لحجم جسم طلب API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | مستودع GitHub الموثوق الذي يستخدمه المحدّث الذاتي، بصيغة `owner/name`. |
+| `VOCAT_REPO` | قناة الإصدار المضمّنة في الملف الثنائي | مستودع GitHub الموثوق الذي يستخدمه المحدّث الذاتي، بصيغة `owner/name`. تستخدم البنى من المصدر `MengMengCode/VoCat` افتراضيًا، بينما تضمّن البنى الموسومة للفروع المستودع الذي أنشأها. |
 | `GITHUB_TOKEN` | فارغ | رمز GitHub اختياري للمستودعات الخاصة أو حدود API أعلى. |
 
 لا تخزّن رموز Telegram، أو كلمات مرور SMTP، أو أسرار webhook، أو بيانات اعتماد SIM، أو بيانات خاصة أخرى في المستودع. قم بإعدادها عبر إعدادات التطبيق أو ملفات البيئة المحمية.
@@ -226,16 +232,18 @@ Quectel USB المدعومة (معرّف الشركة المصنعة USB `2c7c`)
 تحقق من وجود GitHub Release أحدث:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 ثبّت أحدث إصدار:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-ينزّل المحدّث الملف الثنائي المطابق لبنية Linux الحالية، ويتحقق منه باستخدام `SHA256SUMS` المنشور، ويستبدل الملف التنفيذي بشكل ذري، ويعيد تشغيل خدمة systemd `vocat` عند توفرها.
+تستخدم البنى الموسومة المستودع المضمّن بواسطة سير عمل الإصدار الذي أنشأها. اضبط `VOCAT_REPO` أو مرّر `--repo owner/name` فقط لاختيار قناة إصدار موثوقة مختلفة بشكل صريح.
+
+ينزّل المحدّث على Linux المدعوم أرشيف المنصة المطابق، ويتحقق منه باستخدام `SHA256SUMS` المنشور، ويفك الملف التنفيذي بأمان ويتحقق منه، ويحتفظ بالأرشيف المتحقق منه بجانب التثبيت، ثم يستبدل الملف التنفيذي بشكل ذري ويعيد تشغيل خدمة systemd `vocat` عند توفرها.
 
 لتثبيتات Docker:
 
@@ -286,7 +294,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 يؤدي دفع وسم الإصدار إلى بدء سير عملَي GitHub Actions:
 
-- `release-binaries` يبني وينشر ملفات `amd64` و`386` و`arm64` و`aarch64` و`armv7` الثنائية مع `SHA256SUMS`.
+- `release-binaries` يبني أرشيفات منصات Linux لـ `amd64` و`386` و`arm64` و`aarch64` و`armv7` وWindows لـ `amd64` و`arm64`، ثم ينشرها مع `SHA256SUMS`. يحتوي كل أرشيف على الملف التنفيذي وإشعارات الترخيص.
 - `docker` يبني وينشر صورة متعددة البنى إلى GitHub Container Registry.
 
 ```bash
@@ -306,7 +314,7 @@ internal/update/            المحدّث الذاتي لـ GitHub Release
 internal/vowifi/            بيئة تشغيل IKE وEAP-AKA وIMS وWiFi Calling
 scripts/install.sh          مثبّت ومحدّث Linux
 web/src/                    الواجهة الأمامية React وTypeScript
-.github/workflows/          أتمتة إصدارات الملفات الثنائية وDocker
+.github/workflows/          أتمتة إصدارات أرشيفات المنصات وDocker
 ```
 
 ## الاستخدام المسؤول

@@ -48,7 +48,7 @@ Vocat — это веб-панель управления с открытым и
 | Уведомления | Пересылка новых входящих SMS через Telegram, Bark, электронную почту, Pushplus и подписанные вебхуки. Каждое SMS доставляется как отдельное уведомление. |
 | Telegram-бот | Статус устройства, список и переключение установленных профилей, управление WiFi Calling и отправка SMS. Чувствительные действия требуют подтверждения администратора. |
 | Эксплуатация | Аутентификация, защита CSRF, политики доступа, события аудита, журналы в реальном времени, хранение журналов, проверки работоспособности, адаптивная вёрстка, тёмный режим и интерфейс на английском/китайском. |
-| Дистрибуция | Статические бинарные файлы Linux, скрипт установки systemd, самообновление с проверкой SHA-256, образ Docker, публикация в GHCR и сборки релизов GitHub Actions. |
+| Дистрибуция | Платформенные архивы со статическими бинарными файлами Linux и нативными бинарными файлами Windows 11, самообновление с проверкой SHA-256, установка systemd, образ Docker, публикация в GHCR и сборки релизов GitHub Actions. |
 
 ## Поддерживаемое оборудование
 
@@ -99,8 +99,8 @@ VoWiFi IMS требует Linux XFRM/IPsec. В OpenWrt/Kwrt установщик
 Установщик:
 
 - определяет `amd64`, `386`, `arm64`, `aarch64` или `armv7`;
-- загружает соответствующий бинарный файл GitHub Release;
-- проверяет его по `SHA256SUMS`;
+- загружает соответствующий платформенный архив GitHub Release;
+- проверяет архив по `SHA256SUMS` и его содержимое перед безопасной распаковкой;
 - устанавливает Vocat в `/opt/vocat`;
 - создаёт усиленный сервис systemd с доступом к оборудованию и сети, необходимым Vocat;
 - хранит конфигурацию времени выполнения в `/etc/vocat/env`;
@@ -112,24 +112,30 @@ VoWiFi IMS требует Linux XFRM/IPsec. В OpenWrt/Kwrt установщик
 http://<адрес-сервера>:7575
 ```
 
-### Ручная установка бинарного файла
+### Ручная установка из архива
 
-Загрузите соответствующий бинарный файл и `SHA256SUMS` из GitHub Releases:
+Загрузите соответствующий платформенный архив и `SHA256SUMS` из GitHub Releases. Каждый архив содержит исполняемый файл, `LICENSE`, `NOTICE` и `LICENSES/`:
 
 | Платформа | Файл релиза |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32-бит | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32-бит | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 Проверьте и установите его:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -203,7 +209,7 @@ Vocat читает необязательный JSON-файл конфигура
 | `VOCAT_SECURE_COOKIES` | `false` | Помечает cookie сессии как безопасные при использовании HTTPS. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Тайм-аут корректного завершения работы. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Максимальный размер тела запроса API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Доверенный репозиторий GitHub, используемый самообновлятором, в формате `owner/name`. |
+| `VOCAT_REPO` | встроенный в бинарный файл канал релизов | Доверенный репозиторий GitHub, используемый самообновлятором, в формате `owner/name`. Сборки из исходников по умолчанию используют `MengMengCode/VoCat`; сборки форков по тегам встраивают создавший их репозиторий. |
 | `GITHUB_TOKEN` | пусто | Необязательный токен GitHub для приватных репозиториев или более высоких лимитов API. |
 
 Не храните токены Telegram, пароли SMTP, секреты вебхуков, учётные данные SIM или другие приватные данные в репозитории. Настраивайте их через параметры приложения или защищённые файлы окружения.
@@ -227,16 +233,18 @@ Vocat читает необязательный JSON-файл конфигура
 Проверить наличие более нового GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 Установить последний релиз:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-Обновлятор загружает бинарный файл, соответствующий текущей архитектуре Linux, проверяет его по опубликованному `SHA256SUMS`, атомарно заменяет исполняемый файл и перезапускает сервис systemd `vocat`, когда он доступен.
+Сборки по тегам используют репозиторий, встроенный создавшим их процессом публикации. Задавайте `VOCAT_REPO` или передавайте `--repo owner/name` только для явного выбора другого доверенного канала релизов.
+
+В поддерживаемых установках Linux обновлятор загружает соответствующий архив, проверяет его по опубликованному `SHA256SUMS`, безопасно извлекает и проверяет исполняемый файл, сохраняет проверенный архив рядом с установленным приложением, атомарно заменяет исполняемый файл и перезапускает сервис systemd `vocat`, когда он доступен.
 
 Для установок Docker:
 
@@ -287,7 +295,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 Отправка тега версии запускает два рабочих процесса GitHub Actions:
 
-- `release-binaries` собирает и публикует бинарные файлы `amd64`, `386`, `arm64`, `aarch64` и `armv7` вместе с `SHA256SUMS`.
+- `release-binaries` собирает платформенные архивы для Linux `amd64`, `386`, `arm64`, `aarch64` и `armv7`, а также Windows `amd64` и `arm64`, затем публикует их вместе с `SHA256SUMS`. Каждый архив содержит исполняемый файл и лицензионные уведомления.
 - `docker` собирает и публикует мультиархитектурный образ в GitHub Container Registry.
 
 ```bash
@@ -307,7 +315,7 @@ internal/update/            Самообновлятор GitHub Release
 internal/vowifi/            Среда выполнения IKE, EAP-AKA, IMS и WiFi Calling
 scripts/install.sh          Установщик и обновлятор Linux
 web/src/                    Фронтенд на React и TypeScript
-.github/workflows/          Автоматизация релизов бинарных файлов и Docker
+.github/workflows/          Автоматизация релизов платформенных архивов и Docker
 ```
 
 ## Ответственное использование

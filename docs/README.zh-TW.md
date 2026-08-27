@@ -48,7 +48,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列行動通訊模組的開源 Web �
 | 通知 | 透過 Telegram、Bark、電子郵件、Pushplus 以及簽章 Webhook 轉發新接收簡訊,每則簡訊個別推送。 |
 | Telegram 機器人 | 裝置狀態、已安裝設定檔列表與切換、WiFi Calling 控制以及簡訊傳送。敏感操作需要管理員確認。 |
 | 維運 | 驗證、CSRF 防護、存取策略、稽核事件、即時日誌、日誌保留、健康檢查、響應式版面、深色模式以及中英文應用介面。 |
-| 發佈 | 靜態 Linux 二進位檔、systemd 安裝腳本、具 SHA-256 校驗的自我更新、Docker 映像、GHCR 發佈以及 GitHub Actions 發佈建置。 |
+| 發佈 | 包含靜態 Linux 與原生 Windows 11 二進位檔的平台封裝檔、具 SHA-256 校驗的自我更新、systemd 安裝、Docker 映像、GHCR 發佈以及 GitHub Actions 發佈建置。 |
 
 ## 支援的硬體
 
@@ -95,8 +95,8 @@ VoWiFi IMS 必須使用 Linux XFRM/IPsec。OpenWrt/Kwrt 上安裝腳本會從目
 安裝程式會:
 
 - 偵測 `amd64`、`386`、`arm64`、`aarch64` 或 `armv7` 架構;
-- 下載對應的 GitHub Release 二進位檔;
-- 對照 `SHA256SUMS` 進行校驗;
+- 下載對應的 GitHub Release 平台封裝檔;
+- 對照 `SHA256SUMS` 校驗封裝檔,並在安全解壓前檢查其內容;
 - 將 Vocat 安裝到 `/opt/vocat`;
 - 建立具有 Vocat 所需硬體與網路存取權限的強化版 systemd 服務;
 - 將執行時配置存放在 `/etc/vocat/env`;
@@ -108,24 +108,30 @@ VoWiFi IMS 必須使用 Linux XFRM/IPsec。OpenWrt/Kwrt 上安裝腳本會從目
 http://<伺服器位址>:7575
 ```
 
-### 手動二進位安裝
+### 從封裝檔手動安裝
 
-從 GitHub Releases 下載對應的二進位檔與 `SHA256SUMS`:
+從 GitHub Releases 下載對應的平台封裝檔與 `SHA256SUMS`。每個封裝檔都包含可執行檔、`LICENSE`、`NOTICE` 與 `LICENSES/`:
 
 | 平台 | 發佈檔案 |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32 位元 | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32 位元 | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 校驗並安裝:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "管理員密碼: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -186,7 +192,7 @@ Vocat 先從 `VOCAT_CONFIG` 讀取可選的 JSON 配置檔,再套用 `VOCAT_*` �
 | `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 時將工作階段 Cookie 標記為安全。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 優雅關閉逾時時間。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 請求主體最大位元組數。 |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | 自我更新器使用的受信任 GitHub 倉庫,格式為 `owner/name`。 |
+| `VOCAT_REPO` | 二進位檔內嵌的發佈通道 | 自我更新器使用的受信任 GitHub 倉庫,格式為 `owner/name`。原始碼建置預設使用 `MengMengCode/VoCat`;分支的標籤建置則內嵌產生該建置的倉庫。 |
 | `GITHUB_TOKEN` | 空 | 可選的 GitHub token,用於私有倉庫或更高的 API 限額。 |
 
 請勿將 Telegram token、SMTP 密碼、Webhook 金鑰、SIM 憑證或其他私密資料存放在倉庫中。請透過應用設定或受保護的環境檔來配置它們。
@@ -210,16 +216,18 @@ Vocat 先從 `VOCAT_CONFIG` 讀取可選的 JSON 配置檔,再套用 `VOCAT_*` �
 檢查是否有更新的 GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 安裝最新發佈版:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-更新器會下載與目前 Linux 架構匹配的二進位檔,使用已發佈的 `SHA256SUMS` 進行校驗,原子性地替換可執行檔,並在可用時重新啟動 `vocat` systemd 服務。
+標籤建置會使用產生它的發佈工作流程所內嵌的倉庫。只有在明確切換到其他受信任的發佈通道時,才設定 `VOCAT_REPO` 或傳入 `--repo owner/name`。
+
+在支援的 Linux 安裝中,更新器會下載對應的平台封裝檔,使用已發佈的 `SHA256SUMS` 進行校驗,安全地解壓並驗證可執行檔,在安裝位置旁保留已驗證的封裝檔,再原子性地替換可執行檔,並在可用時重新啟動 `vocat` systemd 服務。
 
 Docker 安裝的更新方式:
 
@@ -270,7 +278,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 推送版本標籤會觸發兩個 GitHub Actions 工作流程:
 
-- `release-binaries` 建構並發佈 `amd64`、`386`、`arm64`、`aarch64` 與 `armv7` 二進位檔及 `SHA256SUMS`。
+- `release-binaries` 建構 Linux `amd64`、`386`、`arm64`、`aarch64`、`armv7` 與 Windows `amd64`、`arm64` 的平台封裝檔,並連同 `SHA256SUMS` 發佈。每個封裝檔都包含可執行檔與授權聲明。
 - `docker` 建構並向 GitHub Container Registry 發佈多架構映像。
 
 ```bash
@@ -290,7 +298,7 @@ internal/update/            GitHub Release 自我更新器
 internal/vowifi/            IKE、EAP-AKA、IMS 與 WiFi Calling 執行時
 scripts/install.sh          Linux 安裝與更新腳本
 web/src/                    React 與 TypeScript 前端
-.github/workflows/          二進位檔與 Docker 發佈自動化
+.github/workflows/          平台封裝檔與 Docker 發佈自動化
 ```
 
 ## 合規使用

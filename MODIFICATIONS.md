@@ -10,13 +10,15 @@ Material changes introduced by this fork as of 2026-08-26 include:
 - a native `winscard.dll` PC/SC backend for CCID eUICC discovery, ATR/card
   status, device-instance identity, logical channels, APDU exchange, reset,
   and transaction management;
-- a native Windows single-instance lock;
+- a restricted machine-wide Windows named-object single-instance sentinel;
 - a Wintun user-space ESP/NAT-T data plane with negotiated inner addresses and
-  P-CSCF-only host routes;
+  P-CSCF routes, traffic-selector-validated dynamic media routes, stable adapter
+  identity, transient ring-pressure handling, and fail-closed source routing;
 - dynamic Windows Filtering Platform Manual IPsec SAs and scoped filters for
   IMS traffic;
 - Windows diagnostics for process elevation, Smart Card Service, Base
-  Filtering Engine, and Wintun DLL integrity/architecture;
+  Filtering Engine, and Wintun DLL integrity, architecture, Authenticode trust,
+  and required exports;
 - Windows `amd64` and `arm64` CI/release binaries and explicit manual-update
   behavior; and
 - Windows-specific tests and cross-platform refactoring required to preserve
@@ -35,3 +37,5 @@ authorization.
 
 The original [LICENSE](LICENSE) remains in force. Third-party notices and
 license texts are retained in [NOTICE](NOTICE) and [`LICENSES/`](LICENSES/).
+The implementation review and remediation evidence are recorded in
+[`docs/WINDOWS_NATIVE_REVIEW.md`](docs/WINDOWS_NATIVE_REVIEW.md).

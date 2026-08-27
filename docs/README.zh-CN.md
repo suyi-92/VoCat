@@ -107,9 +107,9 @@ sudo bash install.sh --skip-vowifi-check
 
 安装程序会:
 
-- 检测 `amd64`、`386`、`arm64` 或 `armv7` 架构;
-- 下载对应的 GitHub Release 二进制;
-- 对照 `SHA256SUMS` 进行校验;
+- 检测 `amd64`、`386`、`arm64`、`aarch64` 或 `armv7` 架构;
+- 下载对应的 GitHub Release 平台归档包;
+- 对照 `SHA256SUMS` 校验归档，并在解压前检查归档内容;
 - 将 Vocat 安装到 `/opt/vocat`;
 - 创建具有 Vocat 所需硬件与网络访问权限的强化版 systemd 服务;
 - 将运行时配置存放在 `/etc/vocat/env`;
@@ -121,25 +121,31 @@ sudo bash install.sh --skip-vowifi-check
 http://<服务器地址>:7575
 ```
 
-### 手动二进制安装
+### 手动归档安装
 
-从 GitHub Releases 下载对应的二进制与 `SHA256SUMS`:
+从 GitHub Releases 下载对应的平台归档与 `SHA256SUMS`。每个归档都包含
+可执行文件、`LICENSE`、`NOTICE` 和 `LICENSES/`:
 
 | 平台 | 发布文件 |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32 位 | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
-| Windows 11 x86-64 | `vocat-windows-amd64.exe` |
-| Windows 11 ARM64 | `vocat-windows-arm64.exe` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32 位 | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 校验并安装:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "管理员密码: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -226,7 +232,7 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*
 | `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 时将会话 Cookie 标记为安全。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 优雅关闭超时时间。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 请求体最大字节数。 |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
+| `VOCAT_REPO` | 二进制内嵌发布通道 | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。源码构建默认使用 `MengMengCode/VoCat`；fork 的标签构建会内嵌实际产出该二进制的仓库。 |
 | `GITHUB_TOKEN` | 空 | 可选的 GitHub token,用于私有仓库或更高的 API 限额。 |
 
 管理员账号和密码只保存在 SQLite 数据库中。空数据库需要执行一次
@@ -272,19 +278,23 @@ vocat carrier import-ipcc --install Carrier_iPhone.ipcc
 检查是否有更新的 GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 安装最新发布版:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-在受支持的 Linux 安装上，更新器会下载匹配架构的二进制，使用已发布的
-`SHA256SUMS` 校验，原子替换可执行文件，并在可用时重启 `vocat` systemd
-服务。Windows 支持检查更新，但必须先退出 VoCat 再手动替换 `.exe`，详见
-[Windows 更新步骤](WINDOWS.md#updating-on-windows)。
+标签构建默认使用发布工作流内嵌的产出仓库。只有在明确切换到另一个受信任
+发布通道时，才设置 `VOCAT_REPO` 或传入 `--repo owner/name`。
+
+在受支持的 Linux 安装上，更新器会下载匹配架构的归档，使用已发布的
+`SHA256SUMS` 校验，安全提取并运行验证可执行文件，将已验证归档保留在安装
+目录中，随后原子替换可执行文件，并在可用时重启 `vocat` systemd 服务。
+Windows 支持检查更新，但必须先退出 VoCat，再从已验证的 `.zip` 手动替换
+可执行文件，详见 [Windows 更新步骤](WINDOWS.md#updating-on-windows)。
 
 Docker 安装的更新方式:
 
@@ -335,7 +345,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 推送版本标签会触发两个 GitHub Actions 工作流:
 
-- `release-binaries` 构建并发布 `amd64`、`386`、`arm64` 与 `armv7` 二进制及 `SHA256SUMS`。
+- `release-binaries` 构建 Linux `amd64`、`386`、`arm64`、`aarch64`、`armv7` 与 Windows `amd64`、`arm64`，并发布包含可执行文件和许可声明的平台归档及 `SHA256SUMS`。
 - `docker` 构建并向 GitHub Container Registry 发布多架构镜像。
 
 ```bash

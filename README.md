@@ -114,8 +114,8 @@ sudo bash install.sh --skip-vowifi-check
 The installer:
 
 - detects `amd64`, `386`, `arm64`, `aarch64`, or `armv7`;
-- downloads the matching GitHub Release binary;
-- verifies it against `SHA256SUMS`;
+- downloads the matching GitHub Release platform archive;
+- verifies the archive against `SHA256SUMS` and checks its contents before extraction;
 - installs Vocat under `/opt/vocat`;
 - creates a hardened systemd service with the hardware and network access required by Vocat;
 - stores runtime configuration in `/etc/vocat/env`;
@@ -127,26 +127,31 @@ After installation, open:
 http://<server-address>:7575
 ```
 
-### Manual binary installation
+### Manual archive installation
 
-Download the matching binary and `SHA256SUMS` from GitHub Releases:
+Download the matching platform archive and `SHA256SUMS` from GitHub Releases.
+Each archive contains the executable, `LICENSE`, `NOTICE`, and `LICENSES/`:
 
 | Platform | Release file |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32-bit | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
-| Windows 11 x86-64 | `vocat-windows-amd64.exe` |
-| Windows 11 ARM64 | `vocat-windows-arm64.exe` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32-bit | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 Verify and install it:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -164,7 +169,7 @@ installer when a managed systemd service and automatic restart are required.
 
 Windows uses `winscard.dll` for PC/SC eUICC access, Wintun for the negotiated
 VoWiFi tunnel, and WFP Manual IPsec for IMS. Download the matching Windows
-release binary and follow [docs/WINDOWS.md](docs/WINDOWS.md). The repository
+release archive and follow [docs/WINDOWS.md](docs/WINDOWS.md). The repository
 does not bundle `wintun.dll`.
 
 ### Docker
@@ -253,7 +258,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
+| `VOCAT_REPO` | release channel embedded in the binary | Trusted GitHub repository used by the self-updater, in `owner/name` form. Source builds default to `MengMengCode/VoCat`; tagged fork builds embed their producing repository. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 
 User-supplied Apple carrier bundles can be converted into reviewable,
@@ -285,20 +290,26 @@ Profile switching and SMS submission use one-time confirmation buttons. The bot 
 Check for a newer GitHub Release:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 Install the latest release:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-On supported Linux installations, the updater downloads the matching binary,
-verifies it with the published `SHA256SUMS`, replaces the executable
-atomically, and restarts the `vocat` systemd service when available. Windows
-supports `--check` but deliberately requires the stopped `.exe` to be replaced
-manually; see [the Windows update procedure](docs/WINDOWS.md#updating-on-windows).
+Tagged builds use the repository embedded by their producing release workflow.
+Set `VOCAT_REPO` or pass `--repo owner/name` only to select a different trusted
+release channel explicitly.
+
+On supported Linux installations, the updater downloads the matching archive,
+verifies it with the published `SHA256SUMS`, safely extracts and validates the
+executable, retains the verified archive beside the installation, replaces the
+executable atomically, and restarts the `vocat` systemd service when available.
+Windows supports `--check` but deliberately requires the stopped executable to
+be replaced from the verified `.zip` manually; see
+[the Windows update procedure](docs/WINDOWS.md#updating-on-windows).
 
 For Docker installations:
 
@@ -349,7 +360,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 Pushing a version tag starts two GitHub Actions workflows:
 
-- `release-binaries` builds and publishes Linux `amd64`, `386`, `arm64`, `aarch64`, and `armv7` binaries plus Windows `amd64` and `arm64` binaries and `SHA256SUMS`.
+- `release-binaries` builds Linux `amd64`, `386`, `arm64`, `aarch64`, and `armv7` plus Windows `amd64` and `arm64`, then publishes platform archives containing the executable and license notices together with `SHA256SUMS`.
 - `docker` builds and publishes a multi-architecture image to GitHub Container Registry.
 
 ```bash

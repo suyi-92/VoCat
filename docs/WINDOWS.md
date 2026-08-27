@@ -41,24 +41,31 @@ controls, MCC/MNC restrictions, device limits, or authorization expiry.
 Keep subscriber credentials, activation codes, Ki/OPc material, proxy secrets,
 and operator test data outside the repository and diagnostic logs.
 
-## Install the binary
+## Install the release archive
 
 Download these two files from the same GitHub Release:
 
-- `vocat-windows-amd64.exe` or `vocat-windows-arm64.exe`
+- `vocat-windows-amd64.zip` or `vocat-windows-arm64.zip`
 - `SHA256SUMS`
 
-Verify the binary in PowerShell before running it:
+Verify the downloaded archive in PowerShell before extracting or running it:
 
 ```powershell
-$binary = ".\vocat-windows-amd64.exe"
-$expected = ((Select-String -LiteralPath .\SHA256SUMS -Pattern ([regex]::Escape((Split-Path $binary -Leaf)) + '$')).Line -split '\s+')[0].ToLowerInvariant()
-$actual = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-if (-not $expected -or $actual -ne $expected) { throw "VoCat SHA-256 verification failed" }
+$archive = ".\vocat-windows-amd64.zip"
+$name = Split-Path $archive -Leaf
+$pattern = '^(?<hash>[0-9A-Fa-f]{64})\s+\*?' + [regex]::Escape($name) + '$'
+$records = @(Select-String -LiteralPath .\SHA256SUMS -Pattern $pattern)
+if ($records.Count -ne 1) { throw "Expected exactly one SHA256SUMS record for $name" }
+$expected = $records[0].Matches[0].Groups['hash'].Value.ToLowerInvariant()
+$actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "VoCat SHA-256 verification failed for $name" }
+Expand-Archive -LiteralPath $archive -DestinationPath .\vocat-windows-amd64
 ```
 
-Create a dedicated directory such as `C:\VoCat`, move the verified executable
-there, and optionally rename it to `vocat.exe`.
+Confirm the extracted directory contains the matching `.exe`, `LICENSE`,
+`NOTICE`, and `LICENSES/`. Move that directory to a dedicated location such as
+`C:\VoCat`, retain the verified `.zip` there, and optionally rename the
+executable to `vocat.exe`.
 
 ## Install the official Wintun DLL
 
@@ -72,7 +79,12 @@ DLL beside `vocat.exe`:
 VoCat loads the DLL only from the executable directory or Windows `System32`.
 The executable directory is recommended because it keeps the dependency scoped
 to VoCat. Do not use a DLL from an unofficial download or a different CPU
-architecture.
+architecture. At VoWiFi startup, VoCat locks the selected file against writes,
+replacement, and deletion; validates its PE architecture, cached Authenticode
+trust, and required exports; loads that exact canonical path with System32-only
+dependency search; and verifies the resulting module file identity. The module
+reference is retained for the process lifetime so later Wintun API lookups reuse
+the validated image. VoWiFi fails closed if any step fails.
 
 Wintun is required only for VoWiFi. PC/SC eSIM reading and profile management
 remain available when the DLL is absent.
@@ -124,9 +136,12 @@ Run the read-only diagnostics before starting the server:
 & .\vocat.exe doctor --json
 ```
 
-The Windows report checks elevation, `BFE`, `SCardSvr`, and the Wintun DLL path
-and PE architecture. `doctor` without `--repair-dji-qmi` does not change USB
-bindings, card profiles, routes, or service configuration.
+The Windows report checks elevation, `BFE`, `SCardSvr`, and the Wintun DLL path,
+PE architecture, cached Authenticode trust, and every Wintun API export used by
+VoCat through the same locked-file validation used at VoWiFi startup. `doctor`
+maps the DLL without resolving dependencies or running its initializers. Without
+`--repair-dji-qmi`, it does not change USB bindings, card profiles, routes, or
+service configuration.
 
 Start the foreground service:
 
@@ -140,9 +155,10 @@ Open `http://127.0.0.1:7575`. Use an explicit LAN address and a narrowly scoped
 Windows Firewall rule only if another computer must reach the Web interface.
 Do not expose the unencrypted HTTP listener directly to the public Internet.
 
-Only one VoCat process should use the installation at a time. Windows builds
-use a native file lock to prevent concurrent processes from racing the card,
-Wintun adapter, and WFP state.
+Only one VoCat server process may control a host at a time. Windows builds use
+a restricted machine-wide `Global\` named-object sentinel, shared across
+interactive users and service identities, to prevent concurrent processes from
+racing the card, Wintun adapter, and WFP state.
 
 ## Add and verify the eUICC
 
@@ -171,9 +187,14 @@ When the operator starts VoWiFi, VoCat:
    NAT-T;
 2. creates or opens a dedicated Wintun adapter;
 3. assigns only the negotiated `/32` or `/128` inner address;
-4. installs host routes only for negotiated P-CSCF addresses, with MTU 1380,
-   no default route, disabled router discovery, and no automatic metric; and
-5. installs dynamic, address-and-port-scoped WFP Manual IPsec SAs for IMS.
+4. installs host routes for negotiated P-CSCF addresses and, only after both
+   IKE traffic selectors admit the UDP addresses and ports, active SDP media
+   destinations; routes are reference-counted across early media, final
+   answers, and re-INVITEs;
+5. keeps MTU 1380, no default route, disabled router discovery, and no automatic
+   metric, while a dynamic WFP source guard blocks an assigned inner address
+   from escaping through any non-Wintun interface; and
+6. installs dynamic, address-and-port-scoped WFP Manual IPsec SAs for IMS.
 
 Closing the session removes the dynamic WFP contexts, filters, sublayer,
 routes, and addresses. VoCat does not ask Windows native IKE to acquire an SA
@@ -187,12 +208,16 @@ authorization.
 ## Updating on Windows
 
 Use `vocat.exe update --check` or the Web UI to check for a release. Windows
-does not try to overwrite its running executable. To update:
+does not try to overwrite its running executable. Tagged builds check the
+repository that produced the binary; `VOCAT_REPO` or `--repo` can explicitly
+select a different trusted channel. A release is offered only when it contains
+the matching Windows platform archive and `SHA256SUMS`. To update:
 
-1. download the matching `.exe` and `SHA256SUMS` from the same release;
-2. verify the SHA-256 value;
+1. download the matching `.zip` and `SHA256SUMS` from the same release;
+2. verify the archive's SHA-256 value before extracting it;
 3. stop VoCat and make a backup of the existing executable;
-4. replace it with the verified file; and
+4. extract the archive, replace the executable, refresh `LICENSE`, `NOTICE`,
+   and `LICENSES/`, and retain the verified archive; and
 5. run `doctor --json`, then start `serve` again.
 
 Keep the database and `wintun.dll`; neither needs to be replaced with every
@@ -207,6 +232,10 @@ VoCat release.
 - `wintun_dll_missing`: place the official DLL beside the executable.
 - `wintun_architecture_mismatch`: replace the DLL with the `amd64` or `arm64`
   build matching `vocat.exe`.
+- `wintun_dll_untrusted`: replace the DLL with an Authenticode-trusted package
+  from the official Wintun site.
+- `wintun_dll_exports_missing`: the DLL is not API-compatible with this VoCat
+  build; replace it with the current official architecture-matched DLL.
 - Access denied while creating Wintun or WFP state: restart VoCat from an
   elevated Administrator console.
 - The reader appears as WinUSB but not as a smart-card reader: restore the

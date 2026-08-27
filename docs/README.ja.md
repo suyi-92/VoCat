@@ -48,7 +48,7 @@ Vocat は、Quectel EC20/EC25 クラスのセルラーモデム向けのオー�
 | 通知 | Telegram、Bark、メール、Pushplus、署名付き Webhook を介した新着 SMS の転送。各 SMS は個別の通知として配信されます。 |
 | Telegram ボット | デバイスステータス、インストール済みプロファイルの一覧と切り替え、WiFi Calling 制御、SMS 送信。機密性の高い操作には管理者の確認が必要です。 |
 | 運用 | 認証、CSRF 保護、アクセスポリシー、監査イベント、ライブログ、ログ保持、ヘルスチェック、レスポンシブレイアウト、ダークモード、英語/中国語のアプリケーション UI。 |
-| 配布 | 静的 Linux バイナリ、systemd インストールスクリプト、SHA-256 検証付きの自己更新、Docker イメージ、GHCR 公開、GitHub Actions リリースビルド。 |
+| 配布 | 静的 Linux およびネイティブ Windows 11 バイナリを含むプラットフォーム別アーカイブ、SHA-256 検証付きの自己更新、systemd インストール、Docker イメージ、GHCR 公開、GitHub Actions リリースビルド。 |
 
 ## 対応ハードウェア
 
@@ -95,8 +95,8 @@ VoWiFi IMS には Linux XFRM/IPsec が必要です。OpenWrt/Kwrt では、イ�
 インストーラーは次を行います:
 
 - `amd64`、`386`、`arm64`、`aarch64`、`armv7` を検出します;
-- 一致する GitHub Release バイナリをダウンロードします;
-- `SHA256SUMS` と照合して検証します;
+- 一致する GitHub Release のプラットフォーム別アーカイブをダウンロードします;
+- アーカイブを `SHA256SUMS` と照合して検証し、内容を確認してから安全に展開します;
 - Vocat を `/opt/vocat` にインストールします;
 - Vocat が必要とするハードウェアおよびネットワークアクセスを持つ強化された systemd サービスを作成します;
 - 実行時設定を `/etc/vocat/env` に保存します;
@@ -108,24 +108,30 @@ VoWiFi IMS には Linux XFRM/IPsec が必要です。OpenWrt/Kwrt では、イ�
 http://<サーバーアドレス>:7575
 ```
 
-### 手動バイナリインストール
+### アーカイブからの手動インストール
 
-一致するバイナリと `SHA256SUMS` を GitHub Releases からダウンロードします:
+一致するプラットフォーム別アーカイブと `SHA256SUMS` を GitHub Releases からダウンロードします。各アーカイブには実行ファイル、`LICENSE`、`NOTICE`、`LICENSES/` が含まれます:
 
 | プラットフォーム | リリースファイル |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32 ビット | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32 ビット | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 検証してインストールします:
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -186,7 +192,7 @@ Vocat は `VOCAT_CONFIG` からオプションの JSON 設定ファイルを読�
 | `VOCAT_SECURE_COOKIES` | `false` | HTTPS 使用時にセッション Cookie をセキュアとしてマークします。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | グレースフルシャットダウンのタイムアウト。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API リクエストボディの最大サイズ。 |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | 自己更新機能が使用する信頼された GitHub リポジトリ(`owner/name` 形式)。 |
+| `VOCAT_REPO` | バイナリに埋め込まれたリリースチャネル | 自己更新機能が使用する信頼された GitHub リポジトリ(`owner/name` 形式)。ソースビルドは既定で `MengMengCode/VoCat` を使用し、フォークのタグ付きビルドにはそのビルド元リポジトリが埋め込まれます。 |
 | `GITHUB_TOKEN` | 空 | プライベートリポジトリやより高い API レート制限のためのオプションの GitHub トークン。 |
 
 Telegram トークン、SMTP パスワード、Webhook シークレット、SIM 認証情報、その他のプライベートデータをリポジトリに保存しないでください。アプリケーション設定または保護された環境ファイルを通じて設定してください。
@@ -210,16 +216,18 @@ Telegram 通知が有効で、Chat ID と Admin ID の両方が設定されて�
 より新しい GitHub Release を確認する:
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 最新リリースをインストールする:
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-アップデーターは、現在の Linux アーキテクチャに一致するバイナリをダウンロードし、公開された `SHA256SUMS` で検証し、実行ファイルをアトミックに置き換え、利用可能な場合は `vocat` systemd サービスを再起動します。
+タグ付きビルドは、そのリリースワークフローによって埋め込まれたリポジトリを使用します。別の信頼済みリリースチャネルを明示的に選択する場合に限り、`VOCAT_REPO` を設定するか `--repo owner/name` を渡してください。
+
+サポート対象の Linux インストールでは、アップデーターが一致するアーカイブをダウンロードし、公開された `SHA256SUMS` で検証してから、実行ファイルを安全に展開・検証します。検証済みアーカイブをインストール先の隣に保持し、実行ファイルをアトミックに置き換え、利用可能な場合は `vocat` systemd サービスを再起動します。
 
 Docker インストールの場合:
 
@@ -270,7 +278,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 バージョンタグをプッシュすると、2 つの GitHub Actions ワークフローが開始されます:
 
-- `release-binaries` は `amd64`、`386`、`arm64`、`aarch64`、`armv7` バイナリと `SHA256SUMS` をビルドして公開します。
+- `release-binaries` は Linux `amd64`、`386`、`arm64`、`aarch64`、`armv7` と Windows `amd64`、`arm64` のプラットフォーム別アーカイブをビルドし、`SHA256SUMS` とともに公開します。各アーカイブには実行ファイルとライセンス告知が含まれます。
 - `docker` はマルチアーキテクチャイメージをビルドして GitHub Container Registry に公開します。
 
 ```bash
@@ -290,7 +298,7 @@ internal/update/            GitHub Release 自己更新機能
 internal/vowifi/            IKE、EAP-AKA、IMS、WiFi Calling ランタイム
 scripts/install.sh          Linux インストーラーとアップデーター
 web/src/                    React と TypeScript のフロントエンド
-.github/workflows/          バイナリと Docker のリリース自動化
+.github/workflows/          プラットフォーム別アーカイブと Docker のリリース自動化
 ```
 
 ## 責任ある使用

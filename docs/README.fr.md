@@ -48,7 +48,7 @@ Le backend est écrit en Go, l'interface est construite avec React et TypeScript
 | Notifications | Transfert des nouveaux SMS entrants via Telegram, Bark, e-mail, Pushplus et webhooks signés. Chaque SMS est livré comme une notification individuelle. |
 | Bot Telegram | État de l'appareil, liste et commutation des profils installés, contrôles WiFi Calling et envoi de SMS. Les actions sensibles nécessitent une confirmation de l'administrateur. |
 | Exploitation | Authentification, protection CSRF, politiques d'accès, événements d'audit, journaux en direct, rétention des journaux, vérifications de santé, mise en page réactive, mode sombre et interface utilisateur en anglais/chinois. |
-| Distribution | Binaires Linux statiques, script d'installation systemd, auto-mise à jour avec vérification SHA-256, image Docker, publication GHCR et builds de version GitHub Actions. |
+| Distribution | Archives de plate-forme contenant des binaires Linux statiques et Windows 11 natifs, auto-mise à jour avec vérification SHA-256, installation systemd, image Docker, publication GHCR et builds de version GitHub Actions. |
 
 ## Matériel pris en charge
 
@@ -99,8 +99,8 @@ ne forcez jamais l'installation de kmods compilés pour un noyau différent.
 Le programme d'installation :
 
 - détecte `amd64`, `386`, `arm64`, `aarch64` ou `armv7` ;
-- télécharge le binaire GitHub Release correspondant ;
-- le vérifie par rapport à `SHA256SUMS` ;
+- télécharge l'archive de plate-forme GitHub Release correspondante ;
+- vérifie l'archive par rapport à `SHA256SUMS` et contrôle son contenu avant de l'extraire de manière sécurisée ;
 - installe Vocat sous `/opt/vocat` ;
 - crée un service systemd renforcé disposant des accès matériel et réseau requis par Vocat ;
 - stocke la configuration d'exécution dans `/etc/vocat/env` ;
@@ -112,24 +112,30 @@ Après l'installation, ouvrez :
 http://<adresse-du-serveur>:7575
 ```
 
-### Installation manuelle du binaire
+### Installation manuelle depuis une archive
 
-Téléchargez le binaire correspondant et `SHA256SUMS` depuis GitHub Releases :
+Téléchargez l'archive de plate-forme correspondante et `SHA256SUMS` depuis GitHub Releases. Chaque archive contient l'exécutable, `LICENSE`, `NOTICE` et `LICENSES/` :
 
 | Plateforme | Fichier de version |
 | --- | --- |
-| Linux x86-64 | `vocat-linux-amd64` |
-| Linux x86 32 bits | `vocat-linux-386` |
-| Linux ARM64 | `vocat-linux-arm64` |
-| Linux AArch64 | `vocat-linux-aarch64` |
-| Linux ARMv7 | `vocat-linux-armv7` |
+| Linux x86-64 | `vocat-linux-amd64.tar.gz` |
+| Linux x86 32 bits | `vocat-linux-386.tar.gz` |
+| Linux ARM64 | `vocat-linux-arm64.tar.gz` |
+| Linux AArch64 | `vocat-linux-aarch64.tar.gz` |
+| Linux ARMv7 | `vocat-linux-armv7.tar.gz` |
+| Windows 11 x86-64 | `vocat-windows-amd64.zip` |
+| Windows 11 ARM64 | `vocat-windows-arm64.zip` |
 
 Vérifiez-le et installez-le :
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
+tar -xzf vocat-linux-amd64.tar.gz
+sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data /opt/vocat/LICENSES
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+sudo install -m 0644 LICENSE NOTICE /opt/vocat/
+sudo cp -a LICENSES/. /opt/vocat/LICENSES/
+sudo install -m 0644 vocat-linux-amd64.tar.gz /opt/vocat/bin/vocat.release.tar.gz
 read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
 printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
 unset VOCAT_BOOTSTRAP_PASSWORD
@@ -204,7 +210,7 @@ Vocat lit un fichier de configuration JSON optionnel depuis `VOCAT_CONFIG`, puis
 | `VOCAT_SECURE_COOKIES` | `false` | Marque les cookies de session comme sécurisés lorsque HTTPS est utilisé. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Délai d'arrêt gracieux. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Taille maximale du corps de requête API. |
-| `VOCAT_REPO` | `MengMengCode/VoCat` | Dépôt GitHub de confiance utilisé par l'auto-updater, au format `owner/name`. |
+| `VOCAT_REPO` | canal de publication intégré au binaire | Dépôt GitHub de confiance utilisé par l'auto-updater, au format `owner/name`. Les builds à partir des sources utilisent `MengMengCode/VoCat` par défaut ; les builds tagués des forks intègrent le dépôt qui les produit. |
 | `GITHUB_TOKEN` | vide | Jeton GitHub optionnel pour les dépôts privés ou des limites d'API plus élevées. |
 
 Ne stockez pas de jetons Telegram, mots de passe SMTP, secrets de webhook, identifiants SIM ou autres données privées dans le dépôt. Configurez-les via les paramètres de l'application ou des fichiers d'environnement protégés.
@@ -228,16 +234,18 @@ La commutation de profil et l'envoi de SMS utilisent des boutons de confirmation
 Vérifier l'existence d'une GitHub Release plus récente :
 
 ```bash
-vocat update --check --repo MengMengCode/VoCat
+vocat update --check
 ```
 
 Installer la dernière version :
 
 ```bash
-sudo vocat update --repo MengMengCode/VoCat
+sudo vocat update
 ```
 
-L'updater télécharge le binaire correspondant à l'architecture Linux actuelle, le vérifie avec le `SHA256SUMS` publié, remplace l'exécutable de manière atomique et redémarre le service systemd `vocat` lorsqu'il est disponible.
+Les builds tagués utilisent le dépôt intégré par le workflow de publication qui les produit. Définissez `VOCAT_REPO` ou passez `--repo owner/name` uniquement pour sélectionner explicitement un autre canal de publication de confiance.
+
+Sur les installations Linux prises en charge, l'updater télécharge l'archive correspondante, la vérifie avec le `SHA256SUMS` publié, extrait et valide l'exécutable de manière sécurisée, conserve l'archive vérifiée à côté de l'installation, remplace l'exécutable de manière atomique et redémarre le service systemd `vocat` lorsqu'il est disponible.
 
 Pour les installations Docker :
 
@@ -288,7 +296,7 @@ go build -trimpath -ldflags "-s -w" -o vocat ./cmd/vocat
 
 Pousser un tag de version déclenche deux workflows GitHub Actions :
 
-- `release-binaries` construit et publie les binaires `amd64`, `386`, `arm64`, `aarch64` et `armv7` ainsi que `SHA256SUMS`.
+- `release-binaries` construit des archives de plate-forme pour Linux `amd64`, `386`, `arm64`, `aarch64` et `armv7`, ainsi que Windows `amd64` et `arm64`, puis les publie avec `SHA256SUMS`. Chaque archive contient l'exécutable et les mentions de licence.
 - `docker` construit et publie une image multi-architecture vers GitHub Container Registry.
 
 ```bash
@@ -308,7 +316,7 @@ internal/update/            Auto-updater GitHub Release
 internal/vowifi/            Runtime IKE, EAP-AKA, IMS et WiFi Calling
 scripts/install.sh          Installeur et updater Linux
 web/src/                    Frontend React et TypeScript
-.github/workflows/          Automatisation des versions binaires et Docker
+.github/workflows/          Automatisation des versions d'archives de plate-forme et Docker
 ```
 
 ## Utilisation responsable
