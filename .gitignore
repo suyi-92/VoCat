@@ -61,37 +61,9 @@ Thumbs.db
 .claude/
 .worktrees/
 
-# ---- Checked-in Windows ready-to-run bundles ----
-# Keep runtime state, logs, dependency caches, and arbitrary build output out
-# of Git. Only the reviewed launchers, checksums, signed binaries, and license
-# material below are intentionally versioned.
-/dist/*
-!/dist/SHA256SUMS
-!/dist/start-vocat.cmd
-!/dist/start-vocat.ps1
-!/dist/stop-vocat.cmd
-!/dist/stop-vocat.ps1
-!/dist/windows-amd64/
-!/dist/windows-arm64/
-/dist/windows-amd64/*
-!/dist/windows-amd64/LICENSE
-!/dist/windows-amd64/NOTICE
-!/dist/windows-amd64/vocat.exe
-!/dist/windows-amd64/wintun.dll
-!/dist/windows-amd64/xray.exe
-!/dist/windows-amd64/WINTUN-LICENSE.txt
-!/dist/windows-amd64/XRAY-LICENSE.txt
-!/dist/windows-amd64/LICENSES/
-/dist/windows-amd64/LICENSES/*
-!/dist/windows-amd64/LICENSES/*.txt
-/dist/windows-arm64/*
-!/dist/windows-arm64/LICENSE
-!/dist/windows-arm64/NOTICE
-!/dist/windows-arm64/vocat.exe
-!/dist/windows-arm64/wintun.dll
-!/dist/windows-arm64/xray.exe
-!/dist/windows-arm64/WINTUN-LICENSE.txt
-!/dist/windows-arm64/XRAY-LICENSE.txt
-!/dist/windows-arm64/LICENSES/
-/dist/windows-arm64/LICENSES/*
-!/dist/windows-arm64/LICENSES/*.txt
+# ---- Distribution directory ----
+# Everything under dist is eligible for version control except runtime logs.
+# These negations override repository-wide binary and documentation patterns.
+!/dist/
+!/dist/**
+/dist/data/logs/
