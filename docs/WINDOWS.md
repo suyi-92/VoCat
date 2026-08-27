@@ -69,9 +69,16 @@ executable to `vocat.exe`.
 
 ## Install the official Wintun DLL
 
-VoCat does not redistribute `wintun.dll`. Download the signed Wintun package
-from the [official Wintun site](https://www.wintun.net/), then copy exactly one
-DLL beside `vocat.exe`:
+The checked-in ready-to-run bundles under `dist/windows-amd64` and
+`dist/windows-arm64` already contain the unmodified, Authenticode-signed Wintun
+0.14.1 DLL, its prebuilt-binary license, and checksums. Run `dist/start-vocat.cmd`
+to select the matching architecture, validate the DLL signature, initialize the
+local database, run diagnostics, and start VoCat. Runtime data under `dist/data`
+is intentionally excluded from Git.
+
+For another build that does not contain the DLL, download the signed Wintun
+package from the [official Wintun site](https://www.wintun.net/), then copy
+exactly one DLL beside `vocat.exe`:
 
 - x86-64 VoCat: `bin\amd64\wintun.dll`
 - ARM64 VoCat: `bin\arm64\wintun.dll`

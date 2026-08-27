@@ -27,9 +27,11 @@ included in:
 LICENSES/wintun-MIT.txt
 LICENSES/wireguard-windows-MIT.txt
 
-The VoCat repository does not contain or redistribute wintun.dll. Operators
-who enable Windows VoWiFi obtain the official, architecture-matched DLL
-separately under its accompanying license terms.
+The checked-in Windows ready-to-run bundles redistribute the unmodified,
+Authenticode-signed Wintun 0.14.1 prebuilt DLL alongside VoCat, which uses only
+the documented Wintun API. The accompanying prebuilt-binary license is retained
+as dist/windows-*/WINTUN-LICENSE.txt. Operators using other builds obtain the
+official, architecture-matched DLL separately under those license terms.
 
 Material modifications made by the Windows fork are described in:
 MODIFICATIONS.md

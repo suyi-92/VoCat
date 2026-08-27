@@ -24,9 +24,13 @@ Material changes introduced by this fork as of 2026-08-26 include:
 - Windows-specific tests and cross-platform refactoring required to preserve
   the Linux implementation.
 
-The fork does not bundle `wintun.dll`, vendor subscriber credentials, carrier
-test data, or private IMS configuration. The official Wintun binary must be
-obtained separately by the operator.
+The checked-in `dist/windows-amd64` and `dist/windows-arm64` ready-to-run
+bundles include the unmodified, Authenticode-signed Wintun 0.14.1 DLL alongside
+VoCat and the Wintun prebuilt-binary license, as permitted for software using
+the documented Wintun API. Other release or source builds must obtain an
+official architecture-matched DLL separately. Vendor subscriber credentials,
+carrier test data, private IMS configuration, and runtime databases remain
+excluded from the repository.
 
 These modifications do not remove or weaken the license, geographic controls,
 MCC/MNC restrictions, authorized-SIM/eSIM requirements, device limits,

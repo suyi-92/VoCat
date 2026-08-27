@@ -169,8 +169,11 @@ installer when a managed systemd service and automatic restart are required.
 
 Windows uses `winscard.dll` for PC/SC eUICC access, Wintun for the negotiated
 VoWiFi tunnel, and WFP Manual IPsec for IMS. Download the matching Windows
-release archive and follow [docs/WINDOWS.md](docs/WINDOWS.md). The repository
-does not bundle `wintun.dll`.
+release archive and follow [docs/WINDOWS.md](docs/WINDOWS.md). Ready-to-run
+`amd64` and `arm64` bundles under [`dist/`](dist/) include the official signed
+Wintun 0.14.1 DLL, its prebuilt-binary license, VoCat notices, checksums, and a
+Windows launcher. Operators using another build must supply the matching
+official DLL themselves.
 
 ### Docker
 

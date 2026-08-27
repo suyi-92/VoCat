@@ -161,7 +161,9 @@ sudo env \
 Windows 版使用 `winscard.dll` 访问 PC/SC eUICC，使用 Wintun 承载协商出的
 VoWiFi 内层网络，并使用 WFP Manual IPsec 保护 IMS 流量。请下载匹配架构的
 Windows Release 文件，然后按 [Windows 11 原生部署文档](WINDOWS.md) 操作。
-仓库不捆绑 `wintun.dll`。
+仓库 [`dist/`](../dist/) 中的 `amd64` 与 `arm64` 即用包已包含官方签名的
+Wintun 0.14.1 DLL、预编译二进制许可证、VoCat 许可证材料、校验和与 Windows
+启动脚本；使用其他构建时仍需自行提供匹配架构的官方 DLL。
 
 ### Docker
 
