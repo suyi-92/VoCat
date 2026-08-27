@@ -1084,6 +1084,32 @@ export const EN_DICT: Record<string, string> = {
   "代理已禁用；显式 ICCID 绑定将停止使用该线路且不会转为直连，尚未固化的 MCC 默认规则会回退直连":
     "Proxy disabled. Explicit ICCID bindings stop using this route without falling back to direct; MCC defaults not yet materialized fall back to direct.",
   新增代理: "Add Proxy",
+  "新增 SOCKS5": "Add SOCKS5",
+  "导入 Clash": "Import Clash",
+  "UDP 已关闭": "UDP Disabled",
+  "VoWiFi 依赖 UDP；请先把 Clash 配置中的 udp 改为 true":
+    "VoWiFi requires UDP. Set udp to true in the Clash configuration first.",
+  "新增 SOCKS5，或粘贴 Clash VLESS Reality 配置；再配置国家规则或 ICCID 绑定，未匹配的卡默认直连。":
+    "Add SOCKS5 or paste a Clash VLESS Reality configuration, then configure country rules or ICCID bindings. Unmatched SIMs connect directly.",
+  "替换 Clash VLESS 代理": "Replace Clash VLESS Proxy",
+  "导入 Clash VLESS 代理": "Import Clash VLESS Proxy",
+  "识别并更新": "Parse & Update",
+  "识别并添加": "Parse & Add",
+  "粘贴一个标准 Clash 代理条目、代理列表，或包含 proxies: 的完整 YAML。":
+    "Paste one standard Clash proxy entry, a proxy list, or a complete YAML document containing proxies:.",
+  "VoCat 会自动识别 VLESS、Reality、TLS、指纹、ALPN 与 UDP 设置；UUID 只会以脱敏形式返回界面。":
+    "VoCat automatically recognizes VLESS, Reality, TLS, fingerprint, ALPN, and UDP settings. UUIDs are returned to the UI only in masked form.",
+  "Clash YAML": "Clash YAML",
+  必填: "required",
+  "仅支持 VLESS + TCP + TLS Reality；按 Ctrl+Enter 可直接提交。":
+    "Supports VLESS + TCP + TLS Reality. Press Ctrl+Enter to submit.",
+  "注意：VoWiFi 依赖 UDP。配置中的 udp: false 仍可保存，但不能绑定 SIM/Profile 或国家规则。":
+    "Note: VoWiFi requires UDP. A configuration with udp: false can be saved but cannot be assigned to a SIM/Profile or country rule.",
+  "请粘贴 Clash YAML": "Paste Clash YAML",
+  "代理已保存，但需要检查运行条件": "Proxy saved, but its runtime requirements need attention",
+  "Clash VLESS 代理已更新": "Clash VLESS proxy updated",
+  "Clash VLESS 代理已添加": "Clash VLESS proxy added",
+  "识别 Clash 代理失败": "Failed to parse Clash proxy",
   新增实例: "Add Instance",
   删除规则: "Delete Rule",
   保存规则: "Save Rule",

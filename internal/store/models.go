@@ -14,6 +14,11 @@ import (
 
 const SecretMask = "********"
 
+const (
+	UpstreamProtocolSOCKS5 = "socks5"
+	UpstreamProtocolVLESS  = "vless"
+)
+
 type Device struct {
 	ID                 string
 	Name               string
@@ -274,6 +279,20 @@ type UpstreamProxy struct {
 	UpdatedAt time.Time
 }
 
+// Protocol keeps legacy rows compatible: upstream proxies created before
+// managed Clash imports have no type in extra_json and remain SOCKS5.
+func (value UpstreamProxy) Protocol() string {
+	var metadata struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(value.Extra, &metadata) == nil {
+		if protocol := strings.ToLower(strings.TrimSpace(metadata.Type)); protocol != "" {
+			return protocol
+		}
+	}
+	return UpstreamProtocolSOCKS5
+}
+
 func (value UpstreamProxy) Redacted() UpstreamProxy {
 	if value.Password != "" {
 		value.Password = SecretMask
@@ -303,7 +322,7 @@ type CountryRule struct {
 	UpdatedAt       time.Time
 }
 
-// DeviceProxyBinding selects the SOCKS5 upstream for exactly one eSIM profile.
+// DeviceProxyBinding selects the upstream route for exactly one eSIM profile.
 // ICCID is globally unique, while one proxy may serve profiles on many devices.
 type DeviceProxyBinding struct {
 	DeviceID        string

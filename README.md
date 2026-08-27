@@ -171,9 +171,14 @@ Windows uses `winscard.dll` for PC/SC eUICC access, Wintun for the negotiated
 VoWiFi tunnel, and WFP Manual IPsec for IMS. Download the matching Windows
 release archive and follow [docs/WINDOWS.md](docs/WINDOWS.md). Ready-to-run
 `amd64` and `arm64` bundles under [`dist/`](dist/) include the official signed
-Wintun 0.14.1 DLL, its prebuilt-binary license, VoCat notices, checksums, and a
-Windows launcher. Operators using another build must supply the matching
-official DLL themselves.
+Wintun 0.14.1 DLL and official Xray-core v26.3.27 executable, their license
+texts, VoCat notices, checksums, and Windows start/stop launchers. Double-click
+`dist/start-vocat.cmd`; after readiness checks, VoCat continues in the
+background and the command window closes. Use `dist/stop-vocat.cmd` for a
+graceful shutdown. Background output is retained under `dist/data/logs`.
+Xray is started only when an imported Clash VLESS/Reality upstream is used.
+Operators using another build must supply the matching official runtime files
+themselves.
 
 ### Docker
 

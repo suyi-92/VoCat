@@ -35,6 +35,8 @@ controls, MCC/MNC restrictions, device limits, or authorization expiry.
   eSIM operations can often run without elevation.
 - The **Base Filtering Engine** service (`BFE`) for IMS IPsec.
 - The official, architecture-matched `wintun.dll` for VoWiFi.
+- The official Xray-core v26.3.27 `xray.exe` when Clash VLESS/Reality upstream
+  proxies are used.
 - An operator-authorized SIM/eSIM with WiFi Calling provisioned, reachable
   ePDG, and valid IMS configuration.
 
@@ -67,14 +69,26 @@ Confirm the extracted directory contains the matching `.exe`, `LICENSE`,
 `C:\VoCat`, retain the verified `.zip` there, and optionally rename the
 executable to `vocat.exe`.
 
-## Install the official Wintun DLL
+## Install the Windows runtime files
 
 The checked-in ready-to-run bundles under `dist/windows-amd64` and
 `dist/windows-arm64` already contain the unmodified, Authenticode-signed Wintun
-0.14.1 DLL, its prebuilt-binary license, and checksums. Run `dist/start-vocat.cmd`
-to select the matching architecture, validate the DLL signature, initialize the
-local database, run diagnostics, and start VoCat. Runtime data under `dist/data`
-is intentionally excluded from Git.
+0.14.1 DLL, the unmodified official Xray-core v26.3.27 executable, their license
+texts, and checksums. Run `dist/start-vocat.cmd` to select the matching
+architecture, validate Wintun and Xray before use, initialize the local
+database, run diagnostics, and start VoCat as a hidden background process.
+Once the HTTP listener is ready, the launcher opens the Web UI and its command
+window exits. Run `dist/stop-vocat.cmd` to request a graceful shutdown. Runtime
+state, the database, and background logs under `dist/data` are intentionally
+excluded from Git; stdout and stderr are retained in `dist/data/logs`.
+
+The launcher and VoCat both pin Xray by architecture and SHA-256 before it can
+run:
+
+| Architecture | Xray-core v26.3.27 SHA-256 |
+| --- | --- |
+| x86-64 | `15c2d007954ac53ba69b80ec91242786b3c0b71d52649165b4ca1d5cc96ef8f1` |
+| ARM64 | `e3340409afd87c1cd928e19208c78cb7271e9f95777aa5122db30759b6d2dc81` |
 
 For another build that does not contain the DLL, download the signed Wintun
 package from the [official Wintun site](https://www.wintun.net/), then copy
@@ -95,6 +109,23 @@ the validated image. VoWiFi fails closed if any step fails.
 
 Wintun is required only for VoWiFi. PC/SC eSIM reading and profile management
 remain available when the DLL is absent.
+
+For another build that needs VLESS, download Xray-core v26.3.27 from the
+[official Xray-core release](https://github.com/XTLS/Xray-core/releases/tag/v26.3.27),
+verify the matching hash above, and place `xray.exe` beside `vocat.exe` (or set
+`VOCAT_XRAY_PATH` to that exact file). Windows builds deliberately reject a
+different architecture or hash. VoCat starts one loopback-only SOCKS5 bridge
+on demand for each active VLESS upstream and removes its temporary restricted
+configuration file after Xray has read it.
+
+In **Proxy Management**, choose **Import Clash** and paste exactly one VLESS +
+TCP + TLS Reality proxy entry, a one-item YAML list, or a complete Clash YAML
+document whose `proxies:` list contains one entry. VoCat recognizes `server`,
+`port`, `uuid`, `flow`, `network`, `tls`, `client-fingerprint`, `udp`,
+`reality-opts`, `alpn`, and `servername`. The UUID is stored as a secret and is
+returned to the editor only as `********`. A node with `udp: false` can be
+saved, but cannot be assigned to a SIM/Profile or an MCC country rule because
+VoWiFi requires UDP.
 
 ## Identify the attached USB device
 
@@ -123,6 +154,25 @@ Do not replace the CCID driver with WinUSB. The vendor-specific `MI_02`
 interface is intentionally not opened by the standard eUICC backend.
 
 ## Initialize and run VoCat
+
+For the checked-in ready-to-run bundle, double-click `dist\start-vocat.cmd` or
+run it from PowerShell. The launcher requests Administrator privileges, creates
+the initial `admin` account when necessary, starts VoCat in the background, and
+opens the Web UI. No command-line window remains after startup. Stop that
+background instance with:
+
+```powershell
+& .\dist\stop-vocat.cmd
+```
+
+The stop launcher validates the recorded PID, executable path, and process
+start time before signalling VoCat. VoCat then removes its managed Xray,
+VoWiFi, Wintun, WFP, device, and HTTP resources through the normal graceful
+shutdown path. A forced stop is used only after the configured timeout.
+
+The following commands are the manual foreground alternative. They do not
+create launcher state, so stop a manually launched server with `Ctrl+C` in the
+same console rather than `stop-vocat.cmd`.
 
 Open an elevated PowerShell window for the complete VoWiFi feature set, change
 to the installation directory, and initialize a local database:
@@ -222,13 +272,18 @@ the matching Windows platform archive and `SHA256SUMS`. To update:
 
 1. download the matching `.zip` and `SHA256SUMS` from the same release;
 2. verify the archive's SHA-256 value before extracting it;
-3. stop VoCat and make a backup of the existing executable;
+3. run `dist\stop-vocat.cmd` for a background-launcher instance (or press
+   `Ctrl+C` for a manual foreground instance), then make a backup of the
+   existing executable;
 4. extract the archive, replace the executable, refresh `LICENSE`, `NOTICE`,
-   and `LICENSES/`, and retain the verified archive; and
-5. run `doctor --json`, then start `serve` again.
+   and `LICENSES/`, and retain the verified archive; for a ready-to-run bundle,
+   also refresh its pinned `xray.exe` and Xray license text; and
+5. run `doctor --json`, then use `dist\start-vocat.cmd` again (or start
+   `serve` manually for foreground operation).
 
 Keep the database and `wintun.dll`; neither needs to be replaced with every
-VoCat release.
+VoCat release. Keep `xray.exe` only when its version and SHA-256 still match the
+new VoCat build's documented pin.
 
 ## Troubleshooting
 
@@ -243,6 +298,10 @@ VoCat release.
   from the official Wintun site.
 - `wintun_dll_exports_missing`: the DLL is not API-compatible with this VoCat
   build; replace it with the current official architecture-matched DLL.
+- VLESS import reports that the proxy core is unavailable: place the pinned
+  `xray.exe` beside `vocat.exe`, or configure `VOCAT_XRAY_PATH`.
+- Xray architecture or SHA-256 validation fails: replace it only with the
+  official v26.3.27 file for the current architecture; do not bypass the check.
 - Access denied while creating Wintun or WFP state: restart VoCat from an
   elevated Administrator console.
 - The reader appears as WinUSB but not as a smart-card reader: restore the

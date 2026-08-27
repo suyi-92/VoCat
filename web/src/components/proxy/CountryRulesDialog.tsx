@@ -29,11 +29,15 @@ export function CountryRulesDialog(props: CountryRulesDialogProps) {
   const countryLabel = (country: Country) => regionNames?.of(country.countryCode) || country.countryName || country.countryCode;
   const proxyOptions = useMemo(() => [
     { value: "", label: t("直连") },
-    ...proxies.map((proxy) => ({
-      value: proxy.id,
-      label: proxy.enabled ? (proxy.name || proxy.id) : `${proxy.name || proxy.id}（${t("已禁用")}）`,
-      disabled: !proxy.enabled,
-    })),
+    ...proxies.map((proxy) => {
+      const udpDisabled = proxy.type === "vless" && !proxy.udp;
+      const suffix = !proxy.enabled ? t("已禁用") : udpDisabled ? t("UDP 已关闭") : "";
+      return {
+        value: proxy.id,
+        label: suffix ? `${proxy.name || proxy.id}（${suffix}）` : (proxy.name || proxy.id),
+        disabled: !proxy.enabled || udpDisabled,
+      };
+    }),
   ], [proxies, t, lang]);
 
   useEffect(() => {

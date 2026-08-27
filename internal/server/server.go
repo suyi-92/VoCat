@@ -22,6 +22,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	managedproxy "vocat/internal/proxy"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -49,6 +50,7 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
+	VLESSCore           managedproxy.VLESSCore
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -82,6 +84,7 @@ type Server struct {
 	updateMu                  sync.Mutex
 	updateApplying            bool
 	https                     *httpsmode.Manager
+	vlessCore                 managedproxy.VLESSCore
 	netTraffic                *liveNetTracker
 	hostStats                 *hostStatsSampler
 	publicIPMu                sync.RWMutex
@@ -142,6 +145,7 @@ func New(options Options) (*Server, error) {
 		updateRepository:    strings.TrimSpace(options.UpdateRepository),
 		updateToken:         strings.TrimSpace(options.UpdateToken),
 		https:               options.HTTPS,
+		vlessCore:           options.VLESSCore,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),

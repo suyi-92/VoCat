@@ -5,7 +5,7 @@ This repository is a modified fork of
 implementation is maintained in [`suyi-92/VoCat`](https://github.com/suyi-92/VoCat)
 and is not represented as an official upstream release or endorsement.
 
-Material changes introduced by this fork as of 2026-08-26 include:
+Material changes introduced by this fork as of 2026-08-27 include:
 
 - a native `winscard.dll` PC/SC backend for CCID eUICC discovery, ATR/card
   status, device-instance identity, logical channels, APDU exchange, reset,
@@ -19,6 +19,11 @@ Material changes introduced by this fork as of 2026-08-26 include:
 - Windows diagnostics for process elevation, Smart Card Service, Base
   Filtering Engine, and Wintun DLL integrity, architecture, Authenticode trust,
   and required exports;
+- standard Clash YAML import for VLESS/TCP/TLS Reality upstreams, with strict
+  field validation, secret redaction, UDP-aware binding rules, and an on-demand
+  loopback SOCKS5 bridge through a version- and SHA-256-pinned Xray core;
+- Windows background start and identity-validated graceful-stop launchers,
+  with retained stdout/stderr logs and a bounded force-stop fallback;
 - Windows `amd64` and `arm64` CI/release binaries and explicit manual-update
   behavior; and
 - Windows-specific tests and cross-platform refactoring required to preserve
@@ -27,9 +32,11 @@ Material changes introduced by this fork as of 2026-08-26 include:
 The checked-in `dist/windows-amd64` and `dist/windows-arm64` ready-to-run
 bundles include the unmodified, Authenticode-signed Wintun 0.14.1 DLL alongside
 VoCat and the Wintun prebuilt-binary license, as permitted for software using
-the documented Wintun API. Other release or source builds must obtain an
-official architecture-matched DLL separately. Vendor subscriber credentials,
-carrier test data, private IMS configuration, and runtime databases remain
+the documented Wintun API. They also contain the unmodified official Xray-core
+v26.3.27 executable and its MPL-2.0 license for managed VLESS operation. Other
+release or source builds must obtain the required official, architecture-matched
+runtime files separately. Vendor subscriber credentials, carrier test data,
+private IMS configuration, proxy credentials, and runtime databases remain
 excluded from the repository.
 
 These modifications do not remove or weaken the license, geographic controls,

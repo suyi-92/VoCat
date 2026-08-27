@@ -11,12 +11,14 @@ import (
 	"strings"
 
 	"vocat/internal/device"
+	managedproxy "vocat/internal/proxy"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
 
 type ProxyResolver struct {
-	Store *store.Store
+	Store     *store.Store
+	VLESSCore managedproxy.VLESSCore
 }
 
 func (resolver ProxyResolver) Resolve(
@@ -105,6 +107,32 @@ func (resolver ProxyResolver) Resolve(
 				}
 			}
 		}
+	}
+	if upstream.Protocol() == store.UpstreamProtocolVLESS {
+		node, decodeErr := managedproxy.VLESSFromStored(
+			upstream.Name,
+			upstream.Addr,
+			upstream.Password,
+			upstream.Extra,
+		)
+		if decodeErr != nil {
+			return vowifi.ProxyRoute{}, fmt.Errorf("decode managed VLESS proxy %q: %w", upstream.ID, decodeErr)
+		}
+		if !node.UDP {
+			return vowifi.ProxyRoute{}, fmt.Errorf("upstream proxy %q: %w", upstream.ID, managedproxy.ErrVLESSUDPDisabled)
+		}
+		if resolver.VLESSCore == nil {
+			return vowifi.ProxyRoute{}, fmt.Errorf("upstream proxy %q: %w", upstream.ID, managedproxy.ErrVLESSCoreUnavailable)
+		}
+		address, coreErr := resolver.VLESSCore.Ensure(ctx, upstream.ID, node)
+		if coreErr != nil {
+			return vowifi.ProxyRoute{}, fmt.Errorf("start managed VLESS proxy %q: %w", upstream.ID, coreErr)
+		}
+		return vowifi.ProxyRoute{
+			Mode:    vowifi.ProxyModeSOCKS5,
+			ID:      upstream.ID,
+			Address: address,
+		}, nil
 	}
 	return vowifi.ProxyRoute{
 		Mode:     vowifi.ProxyModeSOCKS5,

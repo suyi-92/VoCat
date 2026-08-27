@@ -337,6 +337,21 @@ export interface UpstreamProxy {
   username: string;
   password?: string;
   enabled: boolean;
+  type?: "socks5" | "vless";
+  uuid?: string;
+  flow?: string;
+  network?: string;
+  tls?: boolean;
+  clientFingerprint?: string;
+  udp?: boolean;
+  realityOptions?: {
+    publicKey?: string;
+    shortId?: string;
+  };
+  alpn?: string[];
+  servername?: string;
+  clashYaml?: string;
+  configError?: string;
 }
 
 export interface UpstreamProxyProbe {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AddRegular, GlobeRegular } from "@fluentui/react-icons";
+import { AddRegular, ArrowImportRegular, GlobeRegular } from "@fluentui/react-icons";
 import { api, ApiError, apiMessage } from "../api";
 import type { Country, CountryRule, DeviceListItem, DeviceProxyBinding, DevicesResponse, ProfileProxyCandidate, UpstreamProxy } from "../types";
 import { usePolling } from "../lib/usePolling";
@@ -16,12 +16,21 @@ import { UpstreamDialog } from "../components/proxy/UpstreamDialog";
 import { DeviceBindingsDialog } from "../components/proxy/DeviceBindingsDialog";
 import { CountryRulesDialog } from "../components/proxy/CountryRulesDialog";
 import { UpstreamSection } from "../components/proxy/UpstreamSection";
+import { ClashImportDialog } from "../components/proxy/ClashImportDialog";
 import { tf, useI18n } from "../lib/i18n";
 import { listPlugins, pluginAssetURL, type InstalledPlugin } from "../extensions";
 
 interface BindingMutationResult {
   reconnectRequested?: boolean;
   reconnectError?: string;
+}
+
+interface ClashImportResult {
+  status?: string;
+  proxy?: UpstreamProxy;
+  probe?: UpstreamProbeResult;
+  message?: string;
+  warningCode?: string;
 }
 
 export default function ProxyPage() {
@@ -39,6 +48,11 @@ export default function ProxyPage() {
   const [upstreamForm, setUpstreamForm] = useState<UpstreamForm>(emptyUpstreamForm());
   const [testingUpstream, setTestingUpstream] = useState(false);
   const [upstreamProbe, setUpstreamProbe] = useState<UpstreamProbeResult | null>(null);
+  const [clashDialogOpen, setClashDialogOpen] = useState(false);
+  const [editingClashProxy, setEditingClashProxy] = useState<UpstreamProxy | null>(null);
+  const [clashContent, setClashContent] = useState("");
+  const [clashBusy, setClashBusy] = useState(false);
+  const [clashError, setClashError] = useState("");
   const [bindingsDialogOpen, setBindingsDialogOpen] = useState(false);
   const [bindingsProxy, setBindingsProxy] = useState<UpstreamProxy | null>(null);
   const [bindingBusy, setBindingBusy] = useState(false);
@@ -107,7 +121,18 @@ export default function ProxyPage() {
     if (!upstreamLoading) void loadUpstream(false);
   }, 10000, false);
 
+  const openClashDialog = useCallback((proxy?: UpstreamProxy) => {
+    setEditingClashProxy(proxy || null);
+    setClashContent(proxy?.clashYaml || "");
+    setClashError("");
+    setClashDialogOpen(true);
+  }, []);
+
   const openUpstreamDialog = useCallback((proxy?: UpstreamProxy) => {
+    if (proxy?.type === "vless") {
+      openClashDialog(proxy);
+      return;
+    }
     setUpstreamProbe(null);
     if (proxy) {
       setEditingUpstream(proxy);
@@ -124,7 +149,39 @@ export default function ProxyPage() {
       setUpstreamForm(emptyUpstreamForm());
     }
     setUpstreamDialogOpen(true);
-  }, []);
+  }, [openClashDialog]);
+
+  const submitClashProxy = useCallback(async () => {
+    const content = clashContent.trim();
+    if (!content) {
+      setClashError(t("请粘贴 Clash YAML"));
+      return;
+    }
+    setClashBusy(true);
+    setClashError("");
+    try {
+      const path = editingClashProxy
+        ? `/upstream-proxies/${encodeURIComponent(editingClashProxy.id)}/clash`
+        : "/upstream-proxies/import-clash";
+      const result = await api<ClashImportResult>(path, {
+        method: editingClashProxy ? "PUT" : "POST",
+        body: { content },
+      });
+      if (result.warningCode) {
+        message.warning(result.message || t("代理已保存，但需要检查运行条件"));
+      } else {
+        message.success(result.message || (editingClashProxy ? t("Clash VLESS 代理已更新") : t("Clash VLESS 代理已添加")));
+      }
+      setClashDialogOpen(false);
+      setEditingClashProxy(null);
+      setClashContent("");
+      await loadUpstream(false);
+    } catch (error) {
+      setClashError(apiMessage(error) || t("识别 Clash 代理失败"));
+    } finally {
+      setClashBusy(false);
+    }
+  }, [clashContent, editingClashProxy, loadUpstream, t]);
 
   const submitUpstream = useCallback(async () => {
     const form = { ...upstreamForm };
@@ -314,9 +371,10 @@ export default function ProxyPage() {
         title={t("代理管理")}
         subtitle={t("管理 VoWiFi 上游代理、MCC 国家规则以及实体 SIM / eSIM Profile 绑定")}
         actions={(
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <Button icon={<GlobeRegular />} onClick={() => setCountryDialogOpen(true)}>{t("MCC 国家规则")}</Button>
-            <Button variant="primary" icon={<AddRegular />} onClick={() => openUpstreamDialog()}>{t("新增代理")}</Button>
+            <Button icon={<AddRegular />} onClick={() => openUpstreamDialog()}>{t("新增 SOCKS5")}</Button>
+            <Button variant="primary" icon={<ArrowImportRegular />} onClick={() => openClashDialog()}>{t("导入 Clash")}</Button>
           </div>
         )}
       />
@@ -359,6 +417,24 @@ export default function ProxyPage() {
           setUpstreamProbe(null);
         }}
         onSubmit={submitUpstream}
+      />
+      <ClashImportDialog
+        open={clashDialogOpen}
+        editing={!!editingClashProxy}
+        content={clashContent}
+        busy={clashBusy}
+        error={clashError}
+        onContentChange={(value) => {
+          setClashContent(value);
+          if (clashError) setClashError("");
+        }}
+        onClose={() => {
+          if (clashBusy) return;
+          setClashDialogOpen(false);
+          setEditingClashProxy(null);
+          setClashError("");
+        }}
+        onSubmit={() => void submitClashProxy()}
       />
       <DeviceBindingsDialog
         open={bindingsDialogOpen}

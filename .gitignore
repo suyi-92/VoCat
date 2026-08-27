@@ -69,6 +69,8 @@ Thumbs.db
 !/dist/SHA256SUMS
 !/dist/start-vocat.cmd
 !/dist/start-vocat.ps1
+!/dist/stop-vocat.cmd
+!/dist/stop-vocat.ps1
 !/dist/windows-amd64/
 !/dist/windows-arm64/
 /dist/windows-amd64/*
@@ -76,7 +78,9 @@ Thumbs.db
 !/dist/windows-amd64/NOTICE
 !/dist/windows-amd64/vocat.exe
 !/dist/windows-amd64/wintun.dll
+!/dist/windows-amd64/xray.exe
 !/dist/windows-amd64/WINTUN-LICENSE.txt
+!/dist/windows-amd64/XRAY-LICENSE.txt
 !/dist/windows-amd64/LICENSES/
 /dist/windows-amd64/LICENSES/*
 !/dist/windows-amd64/LICENSES/*.txt
@@ -85,7 +89,9 @@ Thumbs.db
 !/dist/windows-arm64/NOTICE
 !/dist/windows-arm64/vocat.exe
 !/dist/windows-arm64/wintun.dll
+!/dist/windows-arm64/xray.exe
 !/dist/windows-arm64/WINTUN-LICENSE.txt
+!/dist/windows-arm64/XRAY-LICENSE.txt
 !/dist/windows-arm64/LICENSES/
 /dist/windows-arm64/LICENSES/*
 !/dist/windows-arm64/LICENSES/*.txt

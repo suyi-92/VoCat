@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,6 +20,8 @@ func (s *Server) routeProxyAPI(w http.ResponseWriter, r *http.Request, cleanPath
 	switch cleanPath {
 	case "upstream-proxies":
 		s.handleUpstreamProxies(w, r)
+	case "upstream-proxies/import-clash":
+		s.handleClashProxyImport(w, r, "")
 	case "upstream-proxy-probe":
 		s.handleUpstreamProbeConfig(w, r)
 	case "upstream-proxy-countries":
@@ -40,6 +43,10 @@ func (s *Server) routeProxyAPI(w http.ResponseWriter, r *http.Request, cleanPath
 			segments[2] == "actions" &&
 			segments[3] == "probe":
 			s.handleUpstreamProbe(w, r, segments[1])
+		case len(segments) == 3 &&
+			segments[0] == "upstream-proxies" &&
+			segments[2] == "clash":
+			s.handleClashProxyImport(w, r, segments[1])
 		case len(segments) == 2 && segments[0] == "upstream-proxy-country-rules":
 			s.handleCountryRule(w, r, segments[1])
 		default:
@@ -56,6 +63,10 @@ type upstreamProxyPayload struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Enabled  bool   `json:"enabled"`
+}
+
+type clashProxyImportPayload struct {
+	Content string `json:"content"`
 }
 
 func (s *Server) handleUpstreamProxies(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +97,124 @@ func (s *Server) handleUpstreamProxies(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, POST")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+func (s *Server) handleClashProxyImport(w http.ResponseWriter, r *http.Request, id string) {
+	method := http.MethodPost
+	if id != "" {
+		method = http.MethodPut
+		if !validObjectID(id) {
+			writeError(w, http.StatusBadRequest, "invalid_proxy_id", "proxy ID must use 1-64 safe characters")
+			return
+		}
+	}
+	if !requireMethod(w, r, method) {
+		return
+	}
+	var payload clashProxyImportPayload
+	if err := s.decodeJSON(w, r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	var (
+		nodes []localproxy.VLESSNode
+		err   error
+	)
+	if id == "" {
+		nodes, err = localproxy.ParseClashVLESS(payload.Content)
+	} else {
+		nodes, err = localproxy.ParseClashVLESSUpdate(payload.Content, store.SecretMask)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_clash_proxy", err.Error())
+		return
+	}
+	if len(nodes) != 1 {
+		writeError(w, http.StatusBadRequest, "invalid_clash_proxy_count", "paste exactly one Clash proxy entry")
+		return
+	}
+	node := nodes[0]
+	var existing store.UpstreamProxy
+	if id == "" {
+		id = node.StableID()
+	} else {
+		var loadErr error
+		existing, loadErr = s.store.UpstreamProxy(r.Context(), id)
+		if loadErr != nil {
+			s.writeStoreError(w, loadErr)
+			return
+		}
+		if existing.Protocol() != store.UpstreamProtocolVLESS {
+			writeError(w, http.StatusConflict, "proxy_type_mismatch", "only an existing VLESS proxy can be replaced with Clash YAML")
+			return
+		}
+		if node.UUID == store.SecretMask {
+			node.UUID = existing.Password
+		}
+		if err := node.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_clash_proxy", err.Error())
+			return
+		}
+	}
+	extra, err := node.StoredExtra()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_clash_proxy", err.Error())
+		return
+	}
+	value := store.UpstreamProxy{
+		ID:       id,
+		Name:     node.Name,
+		Addr:     node.ServerAddress(),
+		Password: node.UUID,
+		Enabled:  true,
+		Extra:    extra,
+	}
+	if existing.ID != "" {
+		value.Enabled = existing.Enabled
+		value.CreatedAt = existing.CreatedAt
+	}
+	if err := s.store.UpsertUpstreamProxy(r.Context(), value); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if s.vlessCore != nil {
+		_ = s.vlessCore.Stop(id)
+	}
+	saved, err := s.store.UpstreamProxy(r.Context(), id)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if err := s.requestUpstreamReconnects(r.Context(), saved.ID); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+
+	response := map[string]any{
+		"status": "saved",
+		"proxy":  upstreamProxyResponse(saved.Redacted()),
+	}
+	message := i18n.T("Clash VLESS 代理已识别并保存。")
+	if !node.UDP {
+		message = i18n.T("Clash VLESS 代理已保存；该配置关闭了 UDP，不能用于 VoWiFi 绑定。")
+		response["warning_code"] = "vless_udp_disabled"
+	} else if !saved.Enabled {
+		message = i18n.T("Clash VLESS 代理已保存，启用后才会启动受管代理核心。")
+	} else {
+		probe, probeErr := s.probeStoredUpstream(r.Context(), saved)
+		response["probe"] = probeMap(probe, probeErr)
+		if probeErr == nil && probe.UDPExchangeOK {
+			message = i18n.T("Clash VLESS 代理已保存，受管核心与真实 UDP 往返均通过。")
+		} else if errors.Is(probeErr, localproxy.ErrVLESSCoreUnavailable) {
+			message = i18n.T("Clash VLESS 代理已保存；未找到 Xray 核心，使用前请将 xray 放到 VoCat 旁边。")
+			response["warning_code"] = "vless_core_unavailable"
+		} else {
+			message = i18n.T("Clash VLESS 代理已保存；连通性探测未通过，请检查节点信息。")
+			response["warning_code"] = "vless_probe_failed"
+		}
+	}
+	response["message"] = message
+	writeJSON(w, http.StatusOK, map[string]any{"data": response})
 }
 
 func (s *Server) handleUpstreamProxy(w http.ResponseWriter, r *http.Request, id string) {
@@ -121,6 +250,9 @@ func (s *Server) handleUpstreamProxy(w http.ResponseWriter, r *http.Request, id 
 			s.writeStoreError(w, err)
 			return
 		}
+		if !value.Enabled && s.vlessCore != nil {
+			_ = s.vlessCore.Stop(value.ID)
+		}
 		bindings, err := s.store.ListDeviceProxyBindings(r.Context())
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -153,6 +285,9 @@ func (s *Server) handleUpstreamProxy(w http.ResponseWriter, r *http.Request, id 
 		if err := s.store.DeleteUpstreamProxy(r.Context(), id); err != nil {
 			s.writeStoreError(w, err)
 			return
+		}
+		if s.vlessCore != nil {
+			_ = s.vlessCore.Stop(id)
 		}
 		for _, binding := range bindings {
 			if binding.UpstreamProxyID == id {
@@ -205,6 +340,10 @@ func (s *Server) handleProfileProxyBindings(w http.ResponseWriter, r *http.Reque
 		}
 		if !upstream.Enabled {
 			writeError(w, http.StatusConflict, "upstream_proxy_disabled", "enable the upstream proxy before binding a profile")
+			return
+		}
+		if err := upstreamSupportsVoWiFi(upstream); err != nil {
+			writeError(w, http.StatusConflict, "upstream_proxy_udp_disabled", err.Error())
 			return
 		}
 		if len(request.Bindings) == 0 || len(request.Bindings) > 200 {
@@ -371,28 +510,19 @@ func (s *Server) saveAndProbeUpstream(
 		s.writeStoreError(w, err)
 		return
 	}
+	if s.vlessCore != nil {
+		_ = s.vlessCore.Stop(value.ID)
+	}
 	saved, err := s.store.UpstreamProxy(r.Context(), value.ID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	bindings, err := s.store.ListDeviceProxyBindings(r.Context())
-	if err != nil {
+	if err := s.requestUpstreamReconnects(r.Context(), saved.ID); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	for _, binding := range bindings {
-		if binding.UpstreamProxyID == saved.ID {
-			s.requestProfileProxyRouteReconnect(binding.DeviceID, binding.ICCID)
-		}
-	}
-	probe, probeErr := localproxy.ProbeSOCKS5(
-		r.Context(),
-		saved.Addr,
-		saved.Username,
-		saved.Password,
-		8*time.Second,
-	)
+	probe, probeErr := s.probeStoredUpstream(r.Context(), saved)
 	probeResponse := probeMap(probe, probeErr)
 	message := i18n.T("代理已保存；UDP ASSOCIATE 尚未通过。")
 	if probeErr == nil && probe.UDPExchangeOK {
@@ -408,6 +538,58 @@ func (s *Server) saveAndProbeUpstream(
 	})
 }
 
+func upstreamSupportsVoWiFi(value store.UpstreamProxy) error {
+	if value.Protocol() != store.UpstreamProtocolVLESS {
+		return nil
+	}
+	node, err := localproxy.VLESSFromStored(value.Name, value.Addr, value.Password, value.Extra)
+	if err != nil {
+		return fmt.Errorf("decode VLESS upstream proxy: %w", err)
+	}
+	if !node.UDP {
+		return errors.New("this VLESS proxy has udp: false and cannot carry VoWiFi")
+	}
+	return nil
+}
+
+func (s *Server) requestUpstreamReconnects(ctx context.Context, upstreamID string) error {
+	bindings, err := s.store.ListDeviceProxyBindings(ctx)
+	if err != nil {
+		return err
+	}
+	for _, binding := range bindings {
+		if binding.UpstreamProxyID == upstreamID {
+			s.requestProfileProxyRouteReconnect(binding.DeviceID, binding.ICCID)
+		}
+	}
+	return nil
+}
+
+func (s *Server) probeStoredUpstream(ctx context.Context, value store.UpstreamProxy) (localproxy.ProbeResult, error) {
+	address := value.Addr
+	username := value.Username
+	password := value.Password
+	if value.Protocol() == store.UpstreamProtocolVLESS {
+		node, err := localproxy.VLESSFromStored(value.Name, value.Addr, value.Password, value.Extra)
+		if err != nil {
+			return localproxy.ProbeResult{}, err
+		}
+		if !node.UDP {
+			return localproxy.ProbeResult{}, localproxy.ErrVLESSUDPDisabled
+		}
+		if s.vlessCore == nil {
+			return localproxy.ProbeResult{}, localproxy.ErrVLESSCoreUnavailable
+		}
+		address, err = s.vlessCore.Ensure(ctx, value.ID, node)
+		if err != nil {
+			return localproxy.ProbeResult{}, err
+		}
+		username = ""
+		password = ""
+	}
+	return localproxy.ProbeSOCKS5(ctx, address, username, password, 8*time.Second)
+}
+
 func (s *Server) handleUpstreamProbe(w http.ResponseWriter, r *http.Request, id string) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -417,13 +599,7 @@ func (s *Server) handleUpstreamProbe(w http.ResponseWriter, r *http.Request, id 
 		s.writeStoreError(w, err)
 		return
 	}
-	result, probeErr := localproxy.ProbeSOCKS5(
-		r.Context(),
-		value.Addr,
-		value.Username,
-		value.Password,
-		8*time.Second,
-	)
+	result, probeErr := s.probeStoredUpstream(r.Context(), value)
 	message := i18n.T("代理不能承载 VoWiFi 所需的 UDP。")
 	if probeErr == nil && result.UDPExchangeOK {
 		message = i18n.T("SOCKS5 认证与真实 UDP 往返探测通过。")
@@ -524,8 +700,17 @@ func (s *Server) handleCountryRule(w http.ResponseWriter, r *http.Request, count
 			writeError(w, http.StatusBadRequest, "invalid_country", "country code is not in the supported MCC table")
 			return
 		}
-		if _, err := s.store.UpstreamProxy(r.Context(), request.UpstreamProxyID); err != nil {
+		upstream, err := s.store.UpstreamProxy(r.Context(), request.UpstreamProxyID)
+		if err != nil {
 			s.writeStoreError(w, err)
+			return
+		}
+		if !upstream.Enabled {
+			writeError(w, http.StatusConflict, "upstream_proxy_disabled", "enable the upstream proxy before assigning a country rule")
+			return
+		}
+		if err := upstreamSupportsVoWiFi(upstream); err != nil {
+			writeError(w, http.StatusConflict, "upstream_proxy_udp_disabled", err.Error())
 			return
 		}
 		value := store.CountryRule{
@@ -552,14 +737,35 @@ func (s *Server) handleCountryRule(w http.ResponseWriter, r *http.Request, count
 }
 
 func upstreamProxyResponse(value store.UpstreamProxy) map[string]any {
-	return map[string]any{
+	response := map[string]any{
 		"id":       value.ID,
 		"name":     value.Name,
 		"addr":     value.Addr,
 		"username": value.Username,
 		"password": value.Password,
 		"enabled":  value.Enabled,
+		"type":     value.Protocol(),
 	}
+	if value.Protocol() != store.UpstreamProtocolVLESS {
+		return response
+	}
+	node, err := localproxy.VLESSFromStored(value.Name, value.Addr, value.Password, value.Extra)
+	if err != nil {
+		response["config_error"] = err.Error()
+		return response
+	}
+	yamlText, _ := node.ClashYAML(store.SecretMask)
+	response["uuid"] = store.SecretMask
+	response["flow"] = node.Flow
+	response["network"] = node.Network
+	response["tls"] = node.TLS
+	response["client_fingerprint"] = node.ClientFingerprint
+	response["udp"] = node.UDP
+	response["reality_options"] = node.RealityOptions
+	response["alpn"] = node.ALPN
+	response["servername"] = node.ServerName
+	response["clash_yaml"] = yamlText
+	return response
 }
 
 func countryRuleResponse(value store.CountryRule) map[string]any {

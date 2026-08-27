@@ -13,6 +13,7 @@ require (
 	golang.org/x/text v0.41.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	golang.zx2c4.com/wireguard/windows v1.0.1
+	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.1
 	modernc.org/sqlite v1.38.2
 )

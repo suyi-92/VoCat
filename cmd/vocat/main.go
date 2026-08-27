@@ -29,6 +29,7 @@ import (
 	"vocat/internal/loghub"
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
+	managedproxy "vocat/internal/proxy"
 	"vocat/internal/server"
 	"vocat/internal/store"
 	"vocat/internal/update"
@@ -147,6 +148,18 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return err
 	}
 	defer database.Close()
+	vlessCore := managedproxy.NewXrayManager(managedproxy.XrayOptions{
+		CorePath:   strings.TrimSpace(os.Getenv("VOCAT_XRAY_PATH")),
+		RuntimeDir: filepath.Join(filepath.Dir(cfg.DatabasePath), "proxy-core"),
+		Logger:     logger.With("category", "proxy"),
+	})
+	defer func() {
+		stopContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := vlessCore.Close(stopContext); err != nil {
+			logger.Warn("stop managed VLESS proxy core", "error", err)
+		}
+	}()
 	developerEnabled := isDeveloperEnabled(startupContext, database)
 	pluginRoot := filepath.Join(filepath.Dir(cfg.DatabasePath), "plugins")
 	legacyExportProxyConfig := filepath.Join(pluginRoot, exportproxy.ReservedID, "data", "configs.json")
@@ -245,6 +258,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		database,
 		deviceManager,
 		cardReaders,
+		vlessCore,
 		func(ctx context.Context, call ims.ReceivedCall) error {
 			if onIncomingCall != nil {
 				return onIncomingCall(ctx, call)
@@ -280,6 +294,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateRepository:    strings.TrimSpace(os.Getenv("VOCAT_REPO")),
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
+		VLESSCore:           vlessCore,
 	})
 	if err != nil {
 		return err
@@ -341,6 +356,13 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		syscall.SIGTERM,
 	)
 	defer stopSignals()
+	stopContext, stopFileWatcher := contextWithStopFile(
+		signalContext,
+		strings.TrimSpace(os.Getenv("VOCAT_STOP_FILE")),
+		250*time.Millisecond,
+		logger,
+	)
+	defer stopFileWatcher()
 
 	serverError := make(chan error, 2)
 	go func() {
@@ -363,8 +385,8 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	case err := <-serverError:
 		_ = protocolMux.Close()
 		return err
-	case <-signalContext.Done():
-		logger.Info("shutdown signal received")
+	case <-stopContext.Done():
+		logger.Info("shutdown requested")
 	}
 	// Long-lived SSE and polling handlers use this context. Stop them before
 	// http.Server.Shutdown so they do not consume the entire graceful-shutdown
@@ -578,6 +600,7 @@ func configureVoWiFiRuntime(
 	database *store.Store,
 	deviceManager *device.Manager,
 	cardReaders *pcsc.Service,
+	vlessCore managedproxy.VLESSCore,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
 ) (*vowifiruntime.Manager, error) {
 	mapper := integration.ATMapper{
@@ -634,7 +657,7 @@ func configureVoWiFiRuntime(
 			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
 				adapter = nativeQMIAdapter
 			}
-			return newVoWiFiOrchestrator(deviceConfig, database, adapter, logger, onIncomingCall)
+			return newVoWiFiOrchestrator(deviceConfig, database, adapter, vlessCore, logger, onIncomingCall)
 		},
 	})
 
@@ -791,6 +814,7 @@ func newVoWiFiOrchestrator(
 	deviceConfig store.Device,
 	database *store.Store,
 	adapter vowifiDeviceAdapter,
+	vlessCore managedproxy.VLESSCore,
 	logger *slog.Logger,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
 ) (*vowifi.Orchestrator, error) {
@@ -922,7 +946,7 @@ func newVoWiFiOrchestrator(
 		SIM:    adapter,
 		AKA:    adapter,
 		Radio:  adapter,
-		Proxy:  integration.ProxyResolver{Store: database},
+		Proxy:  integration.ProxyResolver{Store: database, VLESSCore: vlessCore},
 		Tunnel: tunnelProvider,
 		IMS:    imsProvider,
 		Phones: integration.PhoneStore{Store: database, DeviceID: deviceConfig.ID},

@@ -3,13 +3,29 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"vocat/internal/device"
+	managedproxy "vocat/internal/proxy"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
+
+type fakeVLESSCore struct {
+	address string
+	calls   int
+	node    managedproxy.VLESSNode
+}
+
+func (core *fakeVLESSCore) Ensure(_ context.Context, _ string, node managedproxy.VLESSNode) (string, error) {
+	core.calls++
+	core.node = node
+	return core.address, nil
+}
+
+func (*fakeVLESSCore) Stop(string) error { return nil }
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -56,6 +72,87 @@ func TestProxyResolverUsesICCIDProfileBinding(t *testing.T) {
 		route.Username != "proxy-user" ||
 		route.Password != "must-not-be-lost" {
 		t.Fatalf("route = %#v", route)
+	}
+}
+
+func TestProxyResolverStartsManagedVLESSAndReturnsPrivateSOCKSRoute(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "ec20", Name: "EC20"}); err != nil {
+		t.Fatal(err)
+	}
+	node := managedproxy.VLESSNode{
+		Name: "Managed", Type: "vless", Server: "edge.example.com", Port: 443,
+		UUID: "11111111-2222-4333-8444-555555555555", Flow: "xtls-rprx-vision",
+		Network: "tcp", TLS: true, ClientFingerprint: "chrome", UDP: true,
+		RealityOptions: managedproxy.RealityOptions{
+			PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			ShortID:   "0123456789abcdef",
+		},
+		ALPN: []string{"h2", "http/1.1"}, ServerName: "www.example.com",
+	}
+	extra, err := node.StoredExtra()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertUpstreamProxy(context.Background(), store.UpstreamProxy{
+		ID: "managed", Name: node.Name, Addr: node.ServerAddress(), Password: node.UUID, Enabled: true, Extra: extra,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertDeviceProxyBinding(context.Background(), store.DeviceProxyBinding{
+		DeviceID: "ec20", ICCID: "8944100000000000001", ProfileName: "Profile", UpstreamProxyID: "managed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeVLESSCore{address: "127.0.0.1:39123"}
+	route, err := (ProxyResolver{Store: database, VLESSCore: core}).Resolve(
+		context.Background(),
+		vowifi.ProxyRequest{DeviceID: "ec20", ICCID: "8944100000000000001"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Mode != vowifi.ProxyModeSOCKS5 || route.Address != core.address || route.Username != "" || route.Password != "" {
+		t.Fatalf("route = %#v", route)
+	}
+	if core.calls != 1 || core.node.UUID != node.UUID || core.node.RealityOptions != node.RealityOptions {
+		t.Fatalf("core = %+v", core)
+	}
+}
+
+func TestProxyResolverRejectsManagedVLESSWithUDPDisabled(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "ec20", Name: "EC20"}); err != nil {
+		t.Fatal(err)
+	}
+	node := managedproxy.VLESSNode{
+		Name: "No UDP", Type: "vless", Server: "edge.example.com", Port: 443,
+		UUID: "11111111-2222-4333-8444-555555555555", Network: "tcp", TLS: true,
+		ClientFingerprint: "chrome", UDP: false,
+		RealityOptions: managedproxy.RealityOptions{PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+		ServerName:     "www.example.com",
+	}
+	extra, err := node.StoredExtra()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertUpstreamProxy(context.Background(), store.UpstreamProxy{
+		ID: "no-udp", Name: node.Name, Addr: node.ServerAddress(), Password: node.UUID, Enabled: true, Extra: extra,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertDeviceProxyBinding(context.Background(), store.DeviceProxyBinding{
+		DeviceID: "ec20", ICCID: "8944100000000000001", ProfileName: "Profile", UpstreamProxyID: "no-udp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeVLESSCore{address: "127.0.0.1:39123"}
+	_, err = (ProxyResolver{Store: database, VLESSCore: core}).Resolve(
+		context.Background(),
+		vowifi.ProxyRequest{DeviceID: "ec20", ICCID: "8944100000000000001"},
+	)
+	if !errors.Is(err, managedproxy.ErrVLESSUDPDisabled) || core.calls != 0 {
+		t.Fatalf("Resolve() error = %v, core calls = %d", err, core.calls)
 	}
 }
 

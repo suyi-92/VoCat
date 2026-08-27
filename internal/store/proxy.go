@@ -249,7 +249,28 @@ func upsertUpstreamProxy(
 	if err != nil {
 		return fmt.Errorf("normalize upstream proxy extra data: %w", err)
 	}
-	if value.Username == "" {
+	value.Extra = extra
+	protocol := value.Protocol()
+	if protocol != UpstreamProtocolSOCKS5 && protocol != UpstreamProtocolVLESS {
+		return fmt.Errorf("unsupported upstream proxy protocol %q", protocol)
+	}
+	if protocol == UpstreamProtocolVLESS {
+		value.Username = ""
+		if value.Password == "" || value.Password == SecretMask {
+			current, currentErr := upstreamProxy(
+				executor.QueryRowContext(ctx, upstreamProxySelect+` WHERE id = ?`, value.ID),
+			)
+			if currentErr != nil && !errors.Is(currentErr, ErrNotFound) {
+				return fmt.Errorf("read VLESS upstream proxy before update: %w", currentErr)
+			}
+			if currentErr == nil && current.Protocol() == UpstreamProtocolVLESS {
+				value.Password = current.Password
+			}
+		}
+		if value.Password == "" || value.Password == SecretMask {
+			return errors.New("VLESS upstream proxy UUID is required")
+		}
+	} else if value.Username == "" {
 		value.Password = ""
 	} else if value.Password == "" || value.Password == SecretMask {
 		current, currentErr := upstreamProxy(

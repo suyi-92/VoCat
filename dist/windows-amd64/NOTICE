@@ -27,9 +27,28 @@ included in:
 LICENSES/wintun-MIT.txt
 LICENSES/wireguard-windows-MIT.txt
 
-The VoCat repository does not contain or redistribute wintun.dll. Operators
-who enable Windows VoWiFi obtain the official, architecture-matched DLL
-separately under its accompanying license terms.
+VoCat can execute imported Clash VLESS/Reality upstreams through the following
+unmodified third-party proxy core:
+
+  Xray-core v26.3.27
+  Project: https://github.com/XTLS/Xray-core
+  Release: https://github.com/XTLS/Xray-core/releases/tag/v26.3.27
+  License: Mozilla Public License 2.0
+
+The full MPL-2.0 text is included in:
+LICENSES/xray-core-MPL-2.0.txt
+
+The checked-in Windows ready-to-run bundles redistribute the unmodified,
+Authenticode-signed Wintun 0.14.1 prebuilt DLL alongside VoCat, which uses only
+the documented Wintun API. The accompanying prebuilt-binary license is retained
+as dist/windows-*/WINTUN-LICENSE.txt. Operators using other builds obtain the
+official, architecture-matched DLL separately under those license terms.
+
+Those ready-to-run bundles also redistribute the official Xray-core v26.3.27
+Windows executable and retain another copy of its MPL-2.0 text as
+dist/windows-*/XRAY-LICENSE.txt. VoCat starts Xray only on demand for an enabled
+VLESS upstream, binds its SOCKS5 bridge to loopback, and pins the executable's
+architecture and SHA-256 before execution.
 
 Material modifications made by the Windows fork are described in:
 MODIFICATIONS.md
