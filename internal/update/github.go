@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -39,9 +40,14 @@ type CheckResult struct {
 }
 
 const (
-	githubAPI         = "https://api.github.com"
-	DefaultRepository = "MengMengCode/VoCat"
+	githubAPI              = "https://api.github.com"
+	maxReleaseChecksumSize = int64(1 << 20)
 )
+
+// DefaultRepository is the release channel baked into this binary. Official
+// release workflows override it with -ldflags so forks do not silently check
+// another repository's assets.
+var DefaultRepository = "MengMengCode/VoCat"
 
 var githubHTTPClient = &http.Client{
 	Transport: &http.Transport{
@@ -113,10 +119,22 @@ func CheckLatest(ctx context.Context, repo, token, current string) (CheckResult,
 	if err != nil {
 		return CheckResult{}, err
 	}
+	return checkReleaseForPlatform(release, current, runtime.GOOS, runtime.GOARCH)
+}
+
+func checkReleaseForPlatform(release *Release, current, goos, goarch string) (CheckResult, error) {
+	if release == nil {
+		return CheckResult{}, fmt.Errorf("update: release metadata is missing")
+	}
 	latest := strings.TrimPrefix(strings.TrimSpace(release.TagName), "v")
 	available, err := IsNewerVersion(current, latest)
 	if err != nil {
 		return CheckResult{}, fmt.Errorf("update: compare release versions: %w", err)
+	}
+	if available {
+		if _, _, err := releaseAssetsForPlatform(release, goos, goarch); err != nil {
+			return CheckResult{}, err
+		}
 	}
 	return CheckResult{
 		Available:    available,
@@ -127,12 +145,66 @@ func CheckLatest(ctx context.Context, repo, token, current string) (CheckResult,
 	}, nil
 }
 
+func releaseAssetsForPlatform(release *Release, goos, goarch string) (*Asset, *Asset, error) {
+	if release == nil {
+		return nil, nil, fmt.Errorf("update: release metadata is missing")
+	}
+	assetNames := assetNamesFor(goos, goarch)
+	var archiveAsset *Asset
+	for _, name := range assetNames {
+		if archiveAsset = findAsset(release, name); archiveAsset != nil {
+			break
+		}
+	}
+	if archiveAsset == nil {
+		return nil, nil, fmt.Errorf(
+			"update: release %s has none of platform archives %q for %s/%s",
+			release.TagName,
+			assetNames,
+			goos,
+			goarch,
+		)
+	}
+	if err := validateAssetSize(archiveAsset, maxReleaseArchiveSize); err != nil {
+		return nil, nil, err
+	}
+	sumsAsset := findAsset(release, "SHA256SUMS")
+	if sumsAsset == nil {
+		return nil, nil, fmt.Errorf("update: release %s missing SHA256SUMS — refusing an unverified platform update", release.TagName)
+	}
+	if err := validateAssetSize(sumsAsset, maxReleaseChecksumSize); err != nil {
+		return nil, nil, err
+	}
+	return archiveAsset, sumsAsset, nil
+}
+
+func validateAssetSize(asset *Asset, maxBytes int64) error {
+	if asset == nil {
+		return fmt.Errorf("update: release asset metadata is missing")
+	}
+	if maxBytes <= 0 {
+		return fmt.Errorf("update: invalid download limit %d for %s", maxBytes, asset.Name)
+	}
+	if asset.Size <= 0 || asset.Size > maxBytes {
+		return fmt.Errorf(
+			"update: release asset %s has unsafe published size %d (allowed: 1..%d bytes)",
+			asset.Name,
+			asset.Size,
+			maxBytes,
+		)
+	}
+	return nil
+}
+
 // downloadAsset streams a release asset into dst, honoring the request context.
 // The token is applied for consistency with the API call (GitHub release assets
 // redirect to a pre-signed S3 URL; the token is dropped on redirect, which is
 // the expected public-CDN flow).
-func downloadAsset(ctx context.Context, url, token string, dst io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func downloadAsset(ctx context.Context, asset *Asset, token string, maxBytes int64, dst io.Writer) error {
+	if err := validateAssetSize(asset, maxBytes); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.BrowserDownloadURL, nil)
 	if err != nil {
 		return err
 	}
@@ -148,8 +220,20 @@ func downloadAsset(ctx context.Context, url, token string, dst io.Writer) error 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("update: asset download returned %s", resp.Status)
 	}
-	if _, err := io.Copy(dst, resp.Body); err != nil {
+	// Read one byte beyond the trusted API size so a response that lies about
+	// its length is rejected without consuming the rest of an oversized body.
+	limited := &io.LimitedReader{R: resp.Body, N: asset.Size + 1}
+	written, err := io.Copy(dst, limited)
+	if err != nil {
 		return fmt.Errorf("update: read asset body: %w", err)
+	}
+	if written != asset.Size {
+		return fmt.Errorf(
+			"update: asset size mismatch for %s: downloaded %d bytes, expected %d",
+			asset.Name,
+			written,
+			asset.Size,
+		)
 	}
 	return nil
 }

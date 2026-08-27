@@ -15,7 +15,25 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.release.outputs.is_release }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Test release-tag parser
+        run: bash .github/scripts/release-metadata_test.sh
+      - name: Test monotonic latest gate
+        run: bash .github/scripts/docker-latest-gate_test.sh
+      - name: Resolve validated release metadata
+        id: release
+        run: bash .github/scripts/release-metadata.sh "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME"
+
   smoke:
+    needs: metadata
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,18 +65,24 @@ jobs:
           build-args: |
             VERSION=0.0.0-smoke
             BUILD_TIME=${{ github.event.repository.updated_at }}
+            RELEASE_REPOSITORY=${{ github.repository }}
           cache-from: type=gha
 
       - name: Verify ${{ matrix.platform }} runtime, QMI, and smart-card stack
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
         run: |
           docker run --rm --platform '${{ matrix.platform }}' \
             vocat-smoke:${{ matrix.arch }} version
           docker run --rm --platform '${{ matrix.platform }}' \
+            vocat-smoke:${{ matrix.arch }} help | grep -F -- "$EXPECTED_REPOSITORY"
+          docker run --rm --platform '${{ matrix.platform }}' \
             --entrypoint /bin/sh vocat-smoke:${{ matrix.arch }} -c \
-            'command -v qmicli && command -v qmi-network && command -v pcscd && test -d /usr/lib/pcsc/drivers'
+            'command -v qmicli && command -v qmi-network && command -v pcscd && test -d /usr/lib/pcsc/drivers && test -s /opt/vocat/LICENSE && test -s /opt/vocat/NOTICE && test -d /opt/vocat/LICENSES && test "$(find /opt/vocat/LICENSES -type f -name "*.txt" | wc -l)" -gt 0'
 
   build-and-push:
-    needs: smoke
+    if: needs.metadata.outputs.is_release == 'true'
+    needs: [metadata, smoke]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -68,15 +92,17 @@ jobs:
         id: repo
         run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Derive version from tag
-        id: version
+      - name: Derive reproducible build time
+        id: build
         run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
-          fi
           echo "build_time=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Select immutable image tag
+        id: image_tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: echo "tag=$IMAGE:$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -99,10 +125,41 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            BUILD_TIME=${{ steps.version.outputs.build_time }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}:latest
-            ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}:${{ steps.version.outputs.version }}
+            VERSION=${{ needs.metadata.outputs.version }}
+            BUILD_TIME=${{ steps.build.outputs.build_time }}
+            RELEASE_REPOSITORY=${{ github.repository }}
+          tags: ${{ steps.image_tags.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  promote-latest:
+    if: needs.metadata.outputs.is_release == 'true' && needs.metadata.outputs.prerelease == 'false'
+    needs: [metadata, build-and-push]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: docker-release-promotion
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Lowercase repository owner for ghcr.io
+        id: repo
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote newest stable image to latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          bash .github/scripts/docker-latest-gate.sh "$IMAGE" "$VERSION"
+          docker buildx imagetools create \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:$VERSION"

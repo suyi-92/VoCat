@@ -18,6 +18,7 @@ WORKDIR /src
 
 ARG VERSION=0.1.0-dev
 ARG BUILD_TIME=""
+ARG RELEASE_REPOSITORY=MengMengCode/VoCat
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -30,7 +31,7 @@ COPY --from=web-builder /web/dist ./web/dist
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -trimpath \
-    -ldflags "-s -w -X vocat/internal/buildinfo.Version=${VERSION} -X vocat/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+    -ldflags "-s -w -X vocat/internal/buildinfo.Version=${VERSION} -X vocat/internal/buildinfo.BuildTime=${BUILD_TIME} -X vocat/internal/update.DefaultRepository=${RELEASE_REPOSITORY}" \
     -o /out/vocat \
     ./cmd/vocat
 
@@ -44,6 +45,8 @@ RUN mkdir -p /opt/vocat/bin /opt/vocat/data && \
     chown -R vocat:vocat /opt/vocat
 
 COPY --from=go-builder /out/vocat /opt/vocat/bin/vocat
+COPY --from=go-builder /src/LICENSE /src/NOTICE /opt/vocat/
+COPY --from=go-builder /src/LICENSES/ /opt/vocat/LICENSES/
 COPY scripts/docker-entrypoint.sh /usr/local/bin/vocat-entrypoint
 
 # Symlink into /usr/local/bin so `docker exec <ctr> vocat ...` finds it via $PATH.

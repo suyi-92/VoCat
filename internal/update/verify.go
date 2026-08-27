@@ -15,6 +15,8 @@ import (
 // filename. Both the binary ("hash  name") and text ("hash *name") forms are
 // accepted. An empty content or a missing entry yields an error.
 func ParseSHA256SUMS(content, filename string) (string, error) {
+	var matchedHash string
+	matches := 0
 	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -28,13 +30,22 @@ func ParseSHA256SUMS(content, filename string) (string, error) {
 		hash := fields[0]
 		name := strings.TrimPrefix(strings.Join(fields[1:], " "), "*")
 		if name == filename {
-			if len(hash) != 64 {
+			decoded, err := hex.DecodeString(hash)
+			if err != nil || len(decoded) != sha256.Size {
 				return "", fmt.Errorf("update: malformed sha256 %q for %s", hash, filename)
 			}
-			return strings.ToLower(hash), nil
+			matches++
+			matchedHash = strings.ToLower(hash)
 		}
 	}
-	return "", fmt.Errorf("update: %s not found in SHA256SUMS", filename)
+	switch matches {
+	case 0:
+		return "", fmt.Errorf("update: %s not found in SHA256SUMS", filename)
+	case 1:
+		return matchedHash, nil
+	default:
+		return "", fmt.Errorf("update: SHA256SUMS contains %d records for %s; expected exactly one", matches, filename)
+	}
 }
 
 // VerifyFileSHA256 hashes the file at path and reports whether its hex digest

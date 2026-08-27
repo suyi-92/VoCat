@@ -41,7 +41,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $buildTime = git show -s --format=%cI HEAD
           go build -trimpath `
-            -ldflags "-s -w -X vocat/internal/buildinfo.BuildTime=$buildTime" `
+            -ldflags "-s -w -X vocat/internal/buildinfo.BuildTime=$buildTime -X vocat/internal/update.DefaultRepository=$env:GITHUB_REPOSITORY" `
             -o dist/vocat-windows-amd64.exe `
             ./cmd/vocat
           & ./dist/vocat-windows-amd64.exe version
@@ -49,6 +49,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-native-amd64
-          path: dist/vocat-windows-amd64.exe
+          path: |
+            dist/vocat-windows-amd64.exe
+            LICENSE
+            NOTICE
+            LICENSES
           if-no-files-found: error
           retention-days: 7

@@ -9,8 +9,32 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.release.outputs.is_release }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Test release-tag parser
+        run: bash .github/scripts/release-metadata_test.sh
+      - name: Test release asset transaction
+        run: bash .github/scripts/publish-release-assets_test.sh
+      - name: Test installer release binding and lock
+        run: bash .github/scripts/install-helper_test.sh
+      - name: Resolve validated release metadata
+        id: release
+        run: bash .github/scripts/release-metadata.sh "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME"
+
   web:
+    needs: metadata
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -60,7 +84,7 @@ jobs:
         run: go test ./...
 
   binaries:
-    needs: [web, test]
+    needs: [metadata, web, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -71,36 +95,43 @@ jobs:
             goarch: amd64
             goarm: ""
             filename: vocat-linux-amd64
+            archive: vocat-linux-amd64.tar.gz
           - target: linux-386
             goos: linux
             goarch: "386"
             goarm: ""
             filename: vocat-linux-386
+            archive: vocat-linux-386.tar.gz
           - target: linux-arm64
             goos: linux
             goarch: arm64
             goarm: ""
             filename: vocat-linux-arm64
+            archive: vocat-linux-arm64.tar.gz
           - target: linux-aarch64
             goos: linux
             goarch: arm64
             goarm: ""
             filename: vocat-linux-aarch64
+            archive: vocat-linux-aarch64.tar.gz
           - target: linux-armv7
             goos: linux
             goarch: arm
             goarm: "7"
             filename: vocat-linux-armv7
+            archive: vocat-linux-armv7.tar.gz
           - target: windows-amd64
             goos: windows
             goarch: amd64
             goarm: ""
             filename: vocat-windows-amd64.exe
+            archive: vocat-windows-amd64.zip
           - target: windows-arm64
             goos: windows
             goarch: arm64
             goarm: ""
             filename: vocat-windows-arm64.exe
+            archive: vocat-windows-arm64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -124,13 +155,12 @@ jobs:
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: "0"
           OUTPUT: dist/${{ matrix.filename }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           mkdir -p dist
-          VERSION="${VERSION#v}"
           BUILD_TIME="$(git show -s --format=%cI HEAD)"
           go build -trimpath \
-            -ldflags "-s -w -X vocat/internal/buildinfo.Version=${VERSION} -X vocat/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+            -ldflags "-s -w -X vocat/internal/buildinfo.Version=${VERSION} -X vocat/internal/buildinfo.BuildTime=${BUILD_TIME} -X vocat/internal/update.DefaultRepository=${GITHUB_REPOSITORY}" \
             -o "$OUTPUT" \
             ./cmd/vocat
           if [ "$GOOS" = linux ]; then
@@ -144,21 +174,41 @@ jobs:
               amd64|arm64) "$OUTPUT" version ;;
             esac
           fi
+      - name: Package ${{ matrix.target }} with license notices
+        env:
+          GOOS: ${{ matrix.goos }}
+          FILENAME: ${{ matrix.filename }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          package_dir="$(mktemp -d)"
+          trap 'rm -rf "$package_dir"' EXIT
+          cp "dist/$FILENAME" "$package_dir/$FILENAME"
+          cp LICENSE NOTICE "$package_dir/"
+          cp -R LICENSES "$package_dir/LICENSES"
+          archive_path="$GITHUB_WORKSPACE/dist/$ARCHIVE"
+          if [ "$GOOS" = windows ]; then
+            (cd "$package_dir" && zip -qr "$archive_path" "$FILENAME" LICENSE NOTICE LICENSES)
+          else
+            tar -C "$package_dir" -czf "$archive_path" "$FILENAME" LICENSE NOTICE LICENSES
+          fi
       - name: Upload ${{ matrix.target }}
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: dist/${{ matrix.filename }}
+          path: dist/${{ matrix.archive }}
           if-no-files-found: error
           retention-days: 1
 
   github-release:
-    if: github.ref_type == 'tag'
-    needs: binaries
+    if: needs.metadata.outputs.is_release == 'true'
+    needs: [metadata, binaries]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@v4
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
@@ -168,14 +218,49 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum vocat-* | sort > SHA256SUMS
+      - name: Verify release packages
+        working-directory: dist
+        run: |
+          for archive in vocat-windows-*.zip; do
+            binary="${archive%.zip}.exe"
+            entries="$(unzip -Z1 "$archive")"
+            for required in "$binary" LICENSE NOTICE LICENSES/wintun-MIT.txt LICENSES/wireguard-windows-MIT.txt; do
+              grep -Fxq "$required" <<<"$entries"
+            done
+          done
+          for archive in vocat-linux-*.tar.gz; do
+            binary="${archive%.tar.gz}"
+            entries="$(tar -tzf "$archive")"
+            for required in "$binary" LICENSE NOTICE LICENSES/wintun-MIT.txt LICENSES/wireguard-windows-MIT.txt; do
+              grep -Fxq "$required" <<<"$entries"
+            done
+          done
+          sha256sum -c SHA256SUMS
       - name: Create or update GitHub Release
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            bash .github/scripts/publish-release-assets.sh \
+              "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" dist
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
+            release_options=()
+            if [ "$PRERELEASE" = true ]; then
+              release_options+=(--prerelease)
+            fi
+            # Keep a new release hidden until every archive and the checksum
+            # manifest have been uploaded successfully.
+            gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
+              --draft \
+              "${release_options[@]}" \
               --verify-tag
+            bash .github/scripts/publish-release-assets.sh \
+              "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" dist
           fi
+          # Reconcile both directions only after the asset transaction commits.
+          # This also publishes a draft left by an interrupted earlier run.
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease="$PRERELEASE"
